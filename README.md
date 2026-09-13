@@ -39,22 +39,28 @@ Just open reddit.com and log in normally.
 {
   "mcpServers": {
     "reddit": {
-      "command": "node",
-      "args": ["/path/to/reddit-unofficial-api/build/index.js"],
-      "env": {
-        "CHROME_CDP_URL": "http://localhost:9222"
-      }
+      "command": "npx",
+      "args": ["-y", "@mcpware/reddit-unofficial-api"]
     }
   }
 }
 ```
 
-### 4. Build
+If Chrome is on a non-default host/port:
 
-```bash
-cd reddit-unofficial-api
-npm install
-npm run build
+```json
+{
+  "mcpServers": {
+    "reddit": {
+      "command": "npx",
+      "args": ["-y", "@mcpware/reddit-unofficial-api"],
+      "env": {
+        "CHROME_CDP_HOST": "localhost",
+        "CHROME_CDP_PORT": "9222"
+      }
+    }
+  }
+}
 ```
 
 ## Available Tools
@@ -70,6 +76,7 @@ npm run build
 | `reddit_get_subreddit` | Get subreddit info, rules, or browse posts |
 | `reddit_search` | Search across Reddit or within a subreddit |
 | `reddit_get_inbox` | Read your messages |
+| `reddit_get_subscriptions` | List your subscribed subreddits |
 
 ### Write (1.5s rate limit between calls)
 
@@ -163,3 +170,9 @@ This tool uses your real Reddit account. Reddit can't tell the difference betwee
 - One Reddit account at a time (whichever is logged in)
 - Rate limits are undocumented but generous for normal use
 - Not suitable for high-volume scraping or bot armies (and you shouldn't do that anyway)
+
+## Install from npm
+
+```bash
+npm install -g @mcpware/reddit-unofficial-api
+```
