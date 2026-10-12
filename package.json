@@ -14,14 +14,21 @@
     "test": "node test/sanitize.test.mjs && node test/cache.test.mjs"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0",
-    "@modelcontextprotocol/sdk": "^1.12.1"
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
-    "typescript": "^5.8.3",
+    "@types/node": "^22.15.3",
     "tsx": "^4.19.4",
-    "@types/node": "^22.15.3"
+    "typescript": "^5.8.3"
   },
-  "keywords": ["reddit", "api", "mcp", "chrome-devtools", "unofficial", "free"],
+  "keywords": [
+    "reddit",
+    "api",
+    "mcp",
+    "chrome-devtools",
+    "unofficial",
+    "free"
+  ],
   "license": "MIT"
 }
