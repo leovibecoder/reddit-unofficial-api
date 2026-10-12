@@ -3,6 +3,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { sanitizeText } from "./sanitize.js";
 
 // Reddit API helper — executes fetch() in Chrome DevTools context
 // Requires: chrome-devtools-mcp running + Reddit tab logged in
@@ -174,6 +175,8 @@ async function evalInReddit(script: string): Promise<any> {
 // Compact projection: listing payloads from reddit.com are huge (media
 // metadata, award blobs). Default every listing tool to the fields an agent
 // actually reads. Pass compact=false for the raw payload.
+// All text fields pass sanitizeText (per docs/SANITIZATION.md) before
+// truncation. Structural fields (score, comments, link) stay untouched.
 function compactChildren(data: any): any[] {
   const kids: any[] = data?.data?.children ?? data?.children ?? [];
   return kids.map((c: any) => {
@@ -181,13 +184,13 @@ function compactChildren(data: any): any[] {
     const item: Record<string, any> = { kind: c?.kind, id: d?.name || d?.id };
     if (d?.permalink) item.link = `https://www.reddit.com${d.permalink}`;
     else if (d?.url) item.link = d.url;
-    if (d?.subreddit) item.sub = d.subreddit;
-    if (d?.title) item.title = String(d.title).slice(0, 140);
-    if (d?.subject) item.subject = String(d.subject).slice(0, 140);
-    if (d?.author) item.author = d.author;
+    if (d?.subreddit) item.sub = sanitizeText(d.subreddit, 100);
+    if (d?.title) item.title = sanitizeText(d.title, 140);
+    if (d?.subject) item.subject = sanitizeText(d.subject, 140);
+    if (d?.author) item.author = sanitizeText(d.author, 100);
     if (typeof d?.score === "number") item.score = d.score;
     if (typeof d?.num_comments === "number") item.comments = d.num_comments;
-    if (d?.body) item.body = String(d.body).slice(0, 280);
+    if (d?.body) item.body = sanitizeText(d.body, 280);
     if (d?.url && d.url !== d?.permalink && d.url !== item.link) item.url = d.url;
     return item;
   });
@@ -218,11 +221,11 @@ function compactSubs(data: any): any[] {
   const kids: any[] = data?.data?.children ?? data?.children ?? [];
   return kids.map((c: any) => {
     const d = c?.data ?? {};
-    const name = d?.display_name || d?.name || "";
+    const name = sanitizeText(d?.display_name || d?.name || "", 100);
     const item: Record<string, any> = { kind: c?.kind, name };
-    if (d?.display_name_prefixed) item.prefixed = d.display_name_prefixed;
+    if (d?.display_name_prefixed) item.prefixed = sanitizeText(d.display_name_prefixed, 120);
     else if (name) item.prefixed = `r/${name}`;
-    if (d?.title) item.title = String(d.title).slice(0, 120);
+    if (d?.title) item.title = sanitizeText(d.title, 120);
     if (typeof d?.subscribers === "number") item.subscribers = d.subscribers;
     if (typeof d?.over18 === "boolean") item.over18 = d.over18;
     if (name) item.link = `https://www.reddit.com/r/${name}/`;
@@ -236,11 +239,11 @@ function compactMultis(data: any): any[] {
   const arr: any[] = Array.isArray(data) ? data : [];
   return arr.map((m: any) => {
     const d = m?.data ?? {};
-    const subs: string[] = (d?.subreddits ?? []).map((s: any) => s?.name).filter(Boolean);
+    const subs: string[] = (d?.subreddits ?? []).map((s: any) => sanitizeText(s?.name, 100)).filter(Boolean);
     const item: Record<string, any> = {
       kind: m?.kind,
-      name: d?.name || "",
-      display_name: d?.display_name || d?.name || "",
+      name: sanitizeText(d?.name || "", 100),
+      display_name: sanitizeText(d?.display_name || d?.name || "", 140),
     };
     if (d?.path) {
       item.path = d.path;
@@ -260,8 +263,8 @@ function compactTrophies(data: any): any[] {
     const d = t?.data ?? {};
     return {
       kind: t?.kind,
-      name: d?.name || "",
-      description: d?.description || "",
+      name: sanitizeText(d?.name || "", 140),
+      description: sanitizeText(d?.description || "", 280),
       icon: d?.icon_70 || d?.icon_40 || "",
     };
   });
@@ -275,7 +278,7 @@ function compactFriends(data: any): any[] {
       const d = c?.data ?? {};
       return {
         kind: c?.kind,
-        name: d?.name || d?.id || "",
+        name: sanitizeText(d?.name || d?.id || "", 100),
         id: d?.id || "",
         date: d?.date || 0,
       };
@@ -288,11 +291,11 @@ function compactModOf(data: any): any[] {
   const kids: any[] = data?.data?.children ?? data?.children ?? [];
   return kids.map((c: any) => {
     const d = c?.data ?? {};
-    const name = d?.display_name || d?.name || "";
+    const name = sanitizeText(d?.display_name || d?.name || "", 100);
     return {
       kind: c?.kind,
       name,
-      prefixed: d?.display_name_prefixed || (name ? `r/${name}` : ""),
+      prefixed: sanitizeText(d?.display_name_prefixed || (name ? `r/${name}` : ""), 120),
       subscribers: d?.subscribers,
       over18: d?.over18,
       link: name ? `https://www.reddit.com/r/${name}/` : "",

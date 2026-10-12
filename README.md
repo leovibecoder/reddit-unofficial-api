@@ -517,7 +517,7 @@ This tool uses your real Reddit account. Reddit can't tell the difference betwee
 - One Reddit account at a time (whichever is logged in)
 - Rate limits are undocumented but generous for normal use
 - Not suitable for high-volume scraping or bot armies (and you shouldn't do that anyway)
-- Sanitization of raw Reddit content in compact projections is a known gap (see SANITIZATION.md)
+- All text fields in compact projections pass through `sanitizeText` per `docs/SANITIZATION.md` (ANSI, zero-width, control chars stripped; markdown escaped; truncation with ellipsis)
 
 ---
 
