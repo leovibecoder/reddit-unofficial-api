@@ -45,22 +45,13 @@ Cheap probe before any tool call (milliseconds, saves a failed MCP round-trip):
 curl -sf -m 3 http://localhost:9222/json/version
 ```
 
-Then call `reddit_ensure_session` first. It returns `bridge_ready` plus
-per-layer state (`cdp_reachable`, `reddit_tab_found`, `logged_in`).
-Call other `reddit_*` tools only when `bridge_ready` is true.
+Then call `reddit_ensure_session` first. It returns `bridge_ready` plus per-layer state (`cdp_reachable`, `reddit_tab_found`, `logged_in`). Call other `reddit_*` tools only when `bridge_ready` is true.
 
-Listing tools (`reddit_get_post`, `reddit_get_user`, `reddit_get_subreddit`,
-`reddit_search`, `reddit_get_inbox`) return a compact projection by default
-(sub, title, author, score, comments, body snippet). That cuts the payload
-roughly 40x versus raw Reddit JSON. Pass `compact: false` only when you need
-the full payload (media metadata, awards, facets).
+Listing tools return a compact projection by default (sub, title, author, score, comments, body snippet). That cuts the payload roughly 40x versus raw Reddit JSON. Pass `compact: false` only when you need the full payload (media metadata, awards, facets).
 
-Present reddit picks as full-permalink markdown links. Compact output always
-carries `link`, so URLs arrive with no extra fetch round.
+Present reddit picks as full-permalink markdown links. Compact output always carries `link`, so URLs arrive with no extra fetch round.
 
-Rank topical searches by relevance, not score. `sort: "top"` ranks by points
-and surfaces viral threads over matching ones. Prefer `sort: "relevance"`
-when the question is topical, `sort: "top"` when it is best-of.
+Rank topical searches by relevance, not score. `sort: "top"` ranks by points and surfaces viral threads over matching ones. Prefer `sort: "relevance"` when the question is topical, `sort: "top"` when it is best-of.
 
 ### 2. Log into Reddit in Chrome
 
@@ -92,14 +83,14 @@ npm run build
 
 ## Available Tools
 
-### Read (no rate limit concerns)
+### Read Operations
 
 | Tool | What it does |
 |------|-------------|
-| `reddit_me` | Who am I? Get your user info |
+| `reddit_me` | Get current logged-in user info |
 | `reddit_get_post` | Get a post and its comments |
-| `reddit_get_comments` | Get all comments as a flat list (great for analysis) |
-| `reddit_get_user` | Look up any user's profile, posts, comments, or your private tabs (upvoted, saved, hidden, controversial) |
+| `reddit_get_comments` | Get all comments as a flat list |
+| `reddit_get_user` | Look up any user's profile, posts, comments, or your private tabs |
 | `reddit_get_subreddit` | Get subreddit info, rules, or browse posts |
 | `reddit_search` | Search across Reddit or within a subreddit |
 | `reddit_get_inbox` | Read your messages, replies, and mentions |
@@ -107,7 +98,7 @@ npm run build
 | `reddit_get_multis` | List your multis (custom feeds) and their member subreddits |
 | `reddit_get_multi_feed` | Read posts from one of your multis by name |
 
-### Write (1.5s rate limit between calls)
+### Write Operations (1.5s rate limit between calls)
 
 | Tool | What it does |
 |------|-------------|
@@ -126,45 +117,370 @@ npm run build
 |------|-------------|
 | `reddit_ensure_session` | Verify everything is connected and you're logged in |
 
+---
+
+## Tool Reference — Full Details
+
+### `reddit_ensure_session` — Required first call
+
+Check bridge-ready: CDP answers, reddit.com tab exists, user is logged in. Probe this before any other reddit_* tool.
+
+**Arguments:** none
+
+**Returns:** Bridge state object with `bridge_ready`, `cdp_reachable`, `chrome_version`, `reddit_tab_found`, `logged_in`, `username`, `bridge_version`, `build_sha`, `cdp_url`.
+
+---
+
+### `reddit_me` — Who am I?
+
+Get current logged-in Reddit user info (karma, gold status, preferences, feature flags).
+
+**Arguments:** none
+
+**Returns:** Full user profile JSON.
+
+---
+
+### `reddit_get_post` — Get a post and its comments
+
+Fetch a post by URL or ID, with its comment tree.
+
+**Arguments:**
+- `url` (string, required): Reddit post URL or post ID (e.g. `1sdv3lo`)
+- `sort` (enum, default `"top"`): Comment sort — `top`, `new`, `best`, `controversial`, `old`, `qa`
+- `limit` (number, default `100`): Max comments to return
+- `compact` (boolean, default `true`): Compact projection (sub, title, author, score, comments, body snippet). False returns raw payload.
+
+**Returns:** Object with `post` and `comments` arrays. Compact mode includes `link` (full permalink) on every item.
+
+---
+
+### `reddit_get_comments` — Flat comment list
+
+Get all comments for a post as a flat list with author, body, score, parent info, and depth.
+
+**Arguments:**
+- `url` (string, required): Reddit post URL or post ID
+- `sort` (enum, default `"top"`): `top`, `new`, `best`, `controversial`, `old`, `qa`
+
+**Returns:** Flat array of comment objects with `id`, `author`, `body`, `score`, `parent_id`, `depth`, `created_utc`.
+
+---
+
+### `reddit_get_user` — User profile and private tabs
+
+Get any user's profile, posts, comments, or your own private tabs (upvoted, downvoted, saved, hidden, controversial, trophies, friends, moderator).
+
+**Arguments:**
+- `username` (string, required): Reddit username, or `"me"` for the logged-in account
+- `type` (enum, default `"about"`):
+  - `about` — full profile (karma, avatar, bio, etc.)
+  - `overview` — mixed posts and comments
+  - `submitted` — posts only
+  - `comments` — comments only
+  - `controversial` — your controversial posts/comments
+  - `upvoted` — things you upvoted (private, requires `me`)
+  - `downvoted` — things you downvoted (private, requires `me`)
+  - `saved` — saved posts/comments (private, requires `me`)
+  - `hidden` — hidden posts (private, requires `me`)
+  - `trophies` — your trophy case (private, requires `me`)
+  - `friends` — your friends list (private, requires `me`)
+  - `moderator` — subreddits you moderate (private, requires `me`)
+- `limit` (number, default `25`): Max items (listing types only)
+- `compact` (boolean, default `true`): Compact projection. False returns raw payload.
+
+**Notes:**
+- `about` returns the full profile object (not compacted)
+- `trophies`, `friends`, `moderator` have dedicated compact projections
+- `upvoted`, `downvoted`, `saved`, `hidden`, `controversial` are private — only work for your own account (`me`)
+- Compact output always includes `link` (full permalink)
+
+---
+
+### `reddit_get_subreddit` — Subreddit info and feeds
+
+Get subreddit metadata, rules, or browse its posts.
+
+**Arguments:**
+- `subreddit` (string, required): Subreddit name without `r/`
+- `type` (enum, default `"hot"`): `about`, `rules`, `hot`, `new`, `top`, `rising`
+- `limit` (number, default `25`): Max posts
+- `time` (enum, default `"day"`): Time filter for `top`/`controversial` — `hour`, `day`, `week`, `month`, `year`, `all`
+- `compact` (boolean, default `true`): Compact projection. False returns raw payload.
+
+**Returns:** Subreddit object (for `about`/`rules`) or listing of posts (for feed types). Compact includes `link` on every post.
+
+---
+
+### `reddit_search` — Search Reddit
+
+Search posts across Reddit or within a subreddit.
+
+**Arguments:**
+- `query` (string, required): Search query
+- `subreddit` (string, optional): Limit to subreddit (highly recommended — unscoped search returns junk)
+- `sort` (enum, default `"relevance"`): `relevance`, `hot`, `top`, `new`, `comments`
+- `time` (enum, default `"all"`): `hour`, `day`, `week`, `month`, `year`, `all`
+- `limit` (number, default `25`): Max results
+- `compact` (boolean, default `true`): Compact projection. False returns raw payload.
+
+**Best practice:** Always provide `subreddit`. Use `sort: "relevance"` for topical questions, `sort: "top"` for best-of.
+
+---
+
+### `reddit_get_inbox` — Messages, replies, mentions
+
+Read your Reddit messages: inbox, unread, sent, comment replies, post replies, or username mentions.
+
+**Arguments:**
+- `type` (enum, default `"unread"`):
+  - `inbox` — all messages
+  - `unread` — unread only
+  - `sent` — sent messages
+  - `comments` — replies to your comments
+  - `selfreply` — replies to your posts
+  - `mentions` — username mentions
+- `limit` (number, default `25`): Max items
+- `compact` (boolean, default `true`): Compact projection. False returns raw payload.
+
+**Compact output:** Includes `subject` field for message-type items (comments, selfreply, mentions use `title` instead).
+
+---
+
+### `reddit_get_subscriptions` — Your subreddits
+
+List all subreddits the logged-in account subscribes to. Paginated with pacing (max 4 pages / 100 items, 2s between pages to avoid 429).
+
+**Arguments:**
+- `limit` (number, default `100`): Max subreddits to return (capped at 100)
+- `compact` (boolean, default `true`): Compact projection. False returns the first page's raw Reddit payload.
+
+**Compact fields per subreddit:** `kind`, `name`, `prefixed` (e.g. `r/opencode`), `title`, `subscribers`, `over18`, `link`.
+
+---
+
+### `reddit_get_multis` — Your custom feeds (multis)
+
+List the logged-in account's multis (custom feeds): display name, path, visibility, member subreddits.
+
+**Arguments:**
+- `compact` (boolean, default `true`): Compact projection. False returns raw payload.
+
+**Compact fields per multi:** `kind`, `name`, `display_name`, `path`, `link`, `visibility` (private/public), `subCount`, `subs` (array of subreddit names).
+
+---
+
+### `reddit_get_multi_feed` — Read posts from a multi
+
+Read posts from one of your multis by name. Resolves the name against your multis (case-insensitive). Paginated with pacing (max 4 pages / 100 items, 2s between pages).
+
+**Arguments:**
+- `multi` (string, required): Multi name (e.g. `"favoritos"`) or full path (`/user/<name>/m/<multi>`). Resolved against `/api/multi/mine.json`.
+- `limit` (number, default `25`): Max posts (capped at 100)
+- `compact` (boolean, default `true`): Compact projection. False returns first page's raw Reddit payload.
+
+**Compact output:** Standard item projection (sub, title, author, score, comments, link, body snippet).
+
+---
+
+### `reddit_comment` — Reply to a post or comment
+
+**Arguments:**
+- `thing_id` (string, required): Fullname of parent (`t1_` for comment, `t3_` for post)
+- `text` (string, required): Comment text (markdown supported)
+
+**Returns:** `{ success, commentId, errors }`
+
+---
+
+### `reddit_submit` — Create a new post
+
+**Arguments:**
+- `subreddit` (string, required): Subreddit name without `r/`
+- `title` (string, required): Post title
+- `kind` (enum, required): `self` (text) or `link`
+- `text` (string, optional): Post body text (for self posts)
+- `url` (string, optional): URL (for link posts)
+- `flair_id` (string, optional): Flair template ID
+- `flair_text` (string, optional): Flair text
+- `nsfw` (boolean, default `false`)
+- `spoiler` (boolean, default `false`)
+
+**Returns:** Reddit submit response JSON.
+
+---
+
+### `reddit_vote` — Upvote, downvote, or unvote
+
+**Arguments:**
+- `thing_id` (string, required): Fullname (`t1_` or `t3_`)
+- `direction` (enum, required): `up`, `down`, `unvote`
+
+**Returns:** `{ success: true, direction }`
+
+---
+
+### `reddit_save` — Save or unsave
+
+**Arguments:**
+- `thing_id` (string, required): Fullname (`t1_` or `t3_`)
+- `unsave` (boolean, default `false`): Set true to unsave
+
+**Returns:** `{ success: true, action: "saved" | "unsaved" }`
+
+---
+
+### `reddit_send_message` — Send a private message
+
+**Arguments:**
+- `to` (string, required): Username to send to
+- `subject` (string, required): Message subject
+- `text` (string, required): Message body
+
+**Returns:** Reddit compose response JSON.
+
+---
+
+### `reddit_edit` — Edit your own post or comment
+
+**Arguments:**
+- `thing_id` (string, required): Fullname of your post/comment to edit
+- `text` (string, required): New text content
+
+**Returns:** Reddit edit response JSON.
+
+---
+
+### `reddit_delete` — Delete your own post or comment
+
+**Arguments:**
+- `thing_id` (string, required): Fullname of your post/comment to delete
+
+**Returns:** `{ success: true, deleted: thing_id }`
+
+---
+
+### `reddit_subscribe` — Subscribe or unsubscribe
+
+**Arguments:**
+- `subreddit` (string, required): Subreddit name
+- `unsubscribe` (boolean, default `false`): Set true to unsubscribe
+
+**Returns:** `{ success: true, action: "sub" | "unsub", subreddit }`
+
+---
+
+## Compact Projection — What you get by default
+
+All listing tools (`get_post`, `get_user`, `get_subreddit`, `search`, `get_inbox`, `get_subscriptions`, `get_multis`, `get_multi_feed`) return a compact projection by default. This cuts the payload ~40x versus raw Reddit JSON.
+
+**Standard item fields (posts/comments):**
+- `kind` — Reddit kind (`t1`=comment, `t3`=post, `t5`=subreddit)
+- `id` — Reddit base36 ID
+- `link` — Full permalink (`https://www.reddit.com/...`)
+- `sub` — Subreddit name
+- `title` — Post title (truncated to 140 chars)
+- `subject` — Message subject (for inbox items)
+- `author` — Username
+- `score` — Upvotes minus downvotes
+- `comments` — Number of comments
+- `body` — Body text (truncated to 280 chars)
+- `url` — External URL if different from permalink
+
+**Subreddit fields (get_subscriptions):**
+- `kind` — `t5`
+- `name` — Internal name
+- `prefixed` — `r/name` format
+- `title` — Subreddit title
+- `subscribers` — Subscriber count
+- `over18` — NSFW flag
+- `link` — `https://www.reddit.com/r/name/`
+
+**Multi fields (get_multis):**
+- `kind` — `LabeledMulti`
+- `name` — Internal name
+- `display_name` — Human-readable name
+- `path` — Full path (`/user/name/m/multi`)
+- `link` — Full URL
+- `visibility` — `private` or `public`
+- `subCount` — Number of member subreddits
+- `subs` — Array of member subreddit names
+
+**Trophy fields (get_user type=trophies):**
+- `kind` — Trophy kind
+- `name` — Trophy name
+- `description` — Description
+- `icon` — Icon URL (70px or 40px)
+
+**Friend fields (get_user type=friends):**
+- `kind` — User kind
+- `name` — Username
+- `id` — User ID
+- `date` — Friend since timestamp
+
+**Moderator subreddit fields (get_user type=moderator):**
+- `kind` — `t5`
+- `name` — Subreddit name
+- `prefixed` — `r/name`
+- `subscribers` — Subscriber count
+- `over18` — NSFW flag
+- `link` — Full URL
+
+---
+
+## Rate Limits & Pacing
+
+- **Write operations:** 1.5s minimum between calls (enforced server-side)
+- **Paginated reads:** 2s between pages (enforced server-side for subscriptions, multi feeds)
+- **Reddit's native limit:** ~100 req/min authenticated — the pacing avoids tripping it
+- **Read operations:** No artificial delay, but don't fire parallel calls on a cold bridge
+
+---
+
 ## What can you do with this?
 
 ### Community Management
-- **Monitor your posts**: "check my PokeClaw post for new comments that need replies" → scrapes all comments, categorizes them (bug report, question, feature request, positive feedback), drafts replies, you approve, it posts
-- **Batch reply**: reply to 10+ comments in one go with personalized responses, auto-verified to make sure each reply goes to the right person
-- **Update your posts**: edit the body of an existing post to add changelogs, new links, or corrections
+- **Monitor your posts**: Check for new comments needing replies, categorize them (bug report, question, feature request, positive feedback), draft replies, approve, post
+- **Batch reply**: Reply to 10+ comments in one go with personalized responses, auto-verified to go to the right person
+- **Update your posts**: Edit post body to add changelogs, new links, corrections
 
 ### Research & Competitive Intelligence
-- **Search Reddit**: find all posts mentioning your product, a competitor, or a topic across any subreddit
-- **User research**: look up anyone's post history, comment history, karma breakdown
-- **Subreddit discovery**: find relevant subreddits for your niche, check their rules before posting
+- **Search Reddit**: Find all posts mentioning your product, competitor, or topic across any subreddit
+- **User research**: Look up anyone's post history, comment history
+- **Subreddit discovery**: Find relevant subreddits for your niche, check rules before posting
 
 ### Content & Marketing
-- **Cross-post to multiple subreddits**: draft a post, you approve, submit to r/LocalLLaMA, r/androiddev, r/machinelearning, etc.
-- **Track engagement**: check which of your posts/comments are getting upvoted or replied to
-- **Save interesting threads**: bookmark posts and comments for later reference
+- **Cross-post to multiple subreddits**: Draft once, submit to r/LocalLLaMA, r/androiddev, r/machinelearning, etc.
+- **Track engagement**: Check which of your posts/comments are getting upvoted or replied to
+- **Save interesting threads**: Bookmark posts and comments for later reference
 
 ### Inbox & Messaging
-- **Read DMs**: check if anyone messaged you about your project
-- **Send DMs**: reach out to users who want to contribute or reported bugs
-- **Mark as read**: clean up your inbox
+- **Read DMs**: Check if anyone messaged you about your project
+- **Send DMs**: Reach out to users who want to contribute or reported bugs
+- **Read replies/mentions**: `comments`, `selfreply`, `mentions` types catch all engagement
 
 ### Engagement
-- **Upvote helpful feedback**: upvote users who gave useful bug reports or feature suggestions
-- **Subscribe to subreddits**: join relevant communities from your AI assistant
+- **Upvote helpful feedback**: Upvote users who gave useful bug reports or feature suggestions
+- **Subscribe to subreddits**: Join relevant communities from your AI assistant
+- **Manage multis**: List your custom feeds, read their combined posts
 
 ### Deep Research
-- **Topic deep-dive**: "research what Reddit thinks about on-device LLM apps" → searches multiple subreddits, reads top posts and comment threads, summarizes sentiment, common complaints, feature requests, and what users actually want
-- **Competitor analysis**: "what are people saying about DroidRun vs OpenClaw" → finds all relevant threads, extracts comparisons, user experiences, pros/cons mentioned
-- **Market validation**: "is there demand for WhatsApp auto-reply bots" → searches across subreddits, analyzes upvotes and engagement, identifies the audience and their pain points
-- **Trend tracking**: "what local LLM topics are trending this week on r/LocalLLaMA" → fetches top/rising posts, identifies emerging themes
+- **Topic deep-dive**: "Research what Reddit thinks about on-device LLM apps" → searches multiple subreddits, reads top posts and comment threads, summarizes sentiment, common complaints, feature requests
+- **Competitor analysis**: "What are people saying about Tool A vs Tool B" → finds all relevant threads, extracts comparisons, user experiences, pros/cons
+- **Market validation**: "Is there demand for X" → searches across subreddits, analyzes upvotes and engagement, identifies audience and pain points
+- **Trend tracking**: "What topics are trending this week on r/LocalLLaMA" → fetches top/rising posts, identifies emerging themes
 
 Everything runs through your existing browser session. Zero cost, no API keys, no rate limit surprises.
+
+---
 
 ## Why not just use the official Reddit API?
 
 Reddit killed free API access in 2023. The official API now requires app registration, OAuth flows, and has strict rate limits. If you're building something for personal use with your own account, jumping through those hoops makes no sense.
 
 This approach uses the exact same endpoints Reddit's own website uses. Your browser is already authenticated. We just let your AI assistant use that same session.
+
+---
 
 ## Safety Guidelines — Don't Get Your Account Banned
 
@@ -192,6 +508,8 @@ This tool uses your real Reddit account. Reddit can't tell the difference betwee
 - If shadowbanned, appeal at reddit.com/appeal. Usually reversed if your content is genuine.
 - Best prevention: keep it natural. If a human wouldn't post 30 comments in 5 minutes, don't do it with this tool either.
 
+---
+
 ## Limitations
 
 - Needs Chrome running with DevTools Protocol (port 9222)
@@ -199,3 +517,24 @@ This tool uses your real Reddit account. Reddit can't tell the difference betwee
 - One Reddit account at a time (whichever is logged in)
 - Rate limits are undocumented but generous for normal use
 - Not suitable for high-volume scraping or bot armies (and you shouldn't do that anyway)
+- Sanitization of raw Reddit content in compact projections is a known gap (see SANITIZATION.md)
+
+---
+
+## Troubleshooting
+
+**"CDP-unreachable"** — Chrome isn't running with `--remote-debugging-port=9222`. Run `scripts/chrome-bridge.sh`.
+
+**"NO-REDDIT-TAB"** — No reddit.com tab open in the debug Chrome window. Open reddit.com.
+
+**"NOT-LOGGED-IN"** — Reddit tab found but not logged in. Log in to Reddit in that window.
+
+**"STALE: live sha=..."** — The MCP host process is running an old build. Restart your MCP client (new session) after `npm run build`.
+
+**"429 Too Many Requests"** — You're hitting Reddit's rate limit. Wait a minute. The server paces paginated reads automatically; this usually means you fired too many parallel calls.
+
+---
+
+## License
+
+MIT
