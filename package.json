@@ -8,7 +8,7 @@
     "reddit-unofficial-api": "build/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && git rev-parse HEAD > build/BUILD_SHA",
     "dev": "tsx src/index.ts",
     "start": "node build/index.js",
     "test": "node test/sanitize.test.mjs && node test/cache.test.mjs"
