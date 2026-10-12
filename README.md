@@ -18,6 +18,16 @@ Reddit's internal API (the same endpoints their website uses) gives you everythi
 
 ### 1. Start Chrome with DevTools Protocol enabled
 
+Use the repo script (it verifies the port for you):
+
+```bash
+./scripts/chrome-bridge.sh
+# Already have Chrome open? Close it first, or isolate the profile:
+./scripts/chrome-bridge.sh --profile-dir /tmp/chrome-bridge
+```
+
+Manual equivalent:
+
 ```bash
 # macOS
 /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222
@@ -28,6 +38,29 @@ google-chrome --remote-debugging-port=9222
 # Windows
 "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
 ```
+
+Cheap probe before any tool call (milliseconds, saves a failed MCP round-trip):
+
+```bash
+curl -sf -m 3 http://localhost:9222/json/version
+```
+
+Then call `reddit_ensure_session` first. It returns `bridge_ready` plus
+per-layer state (`cdp_reachable`, `reddit_tab_found`, `logged_in`).
+Call other `reddit_*` tools only when `bridge_ready` is true.
+
+Listing tools (`reddit_get_post`, `reddit_get_user`, `reddit_get_subreddit`,
+`reddit_search`, `reddit_get_inbox`) return a compact projection by default
+(sub, title, author, score, comments, body snippet). That cuts the payload
+roughly 40x versus raw Reddit JSON. Pass `compact: false` only when you need
+the full payload (media metadata, awards, facets).
+
+Present reddit picks as full-permalink markdown links. Compact output always
+carries `link`, so URLs arrive with no extra fetch round.
+
+Rank topical searches by relevance, not score. `sort: "top"` ranks by points
+and surfaces viral threads over matching ones. Prefer `sort: "relevance"`
+when the question is topical, `sort: "top"` when it is best-of.
 
 ### 2. Log into Reddit in Chrome
 
@@ -66,10 +99,13 @@ npm run build
 | `reddit_me` | Who am I? Get your user info |
 | `reddit_get_post` | Get a post and its comments |
 | `reddit_get_comments` | Get all comments as a flat list (great for analysis) |
-| `reddit_get_user` | Look up any user's profile, posts, or comments |
+| `reddit_get_user` | Look up any user's profile, posts, comments, or your private tabs (upvoted, saved, hidden, controversial) |
 | `reddit_get_subreddit` | Get subreddit info, rules, or browse posts |
 | `reddit_search` | Search across Reddit or within a subreddit |
-| `reddit_get_inbox` | Read your messages |
+| `reddit_get_inbox` | Read your messages, replies, and mentions |
+| `reddit_get_subscriptions` | List the subreddits you subscribe to |
+| `reddit_get_multis` | List your multis (custom feeds) and their member subreddits |
+| `reddit_get_multi_feed` | Read posts from one of your multis by name |
 
 ### Write (1.5s rate limit between calls)
 
