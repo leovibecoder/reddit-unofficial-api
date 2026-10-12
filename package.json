@@ -10,7 +10,8 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
-    "start": "node build/index.js"
+    "start": "node build/index.js",
+    "test": "node test/sanitize.test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
