@@ -218,7 +218,7 @@ Get subreddit metadata, rules, or browse its posts.
 
 ### `reddit_search` — Search within a subreddit
 
-Search posts within a subreddit. Global search is not supported: unscoped search returns junk (CODING_STANDARDS §8.3), so `subreddit` is required.
+Search posts within a subreddit. Global search is not supported: unscoped search returns junk (CODING_STANDARDS §8.3), and the tool requires `subreddit`.
 
 **Arguments:**
 - `query` (string, required): Search query
@@ -545,7 +545,7 @@ Listing tools cache GET responses in memory (PRD 4 stage 1: rate-limit/cache che
 - **Manage multis**: List your custom feeds, read their combined posts
 
 ### Deep Research
-- **Topic deep-dive**: "Research what Reddit thinks about on-device LLM apps" → searches multiple subreddits, reads top posts and comment threads, summarizes sentiment, common complaints, feature requests
+- **Topic deep-dive**: "Research what Reddit thinks about on-device LLM apps" → searches multiple subreddits, reads top posts and comment threads, summarizes sentiment and common complaints
 - **Competitor analysis**: "What are people saying about Tool A vs Tool B" → finds all relevant threads, extracts comparisons, user experiences, pros/cons
 - **Market validation**: "Is there demand for X" → searches across subreddits, analyzes upvotes and engagement, identifies audience and pain points
 - **Trend tracking**: "What topics are trending this week on r/LocalLLaMA" → fetches top/rising posts, identifies emerging themes
@@ -597,7 +597,7 @@ This tool uses your real Reddit account. Reddit can't tell the difference betwee
 - One Reddit account at a time (whichever is logged in)
 - Rate limits are undocumented but generous for normal use
 - Not suitable for high-volume scraping or bot armies (and you shouldn't do that anyway)
-- All text fields in compact projections pass through `sanitizeText` per `docs/SANITIZATION.md` (ANSI, zero-width, control chars stripped; markdown escaped; truncation with ellipsis)
+- All text fields in compact projections pass through `sanitizeText` per `docs/SANITIZATION.md`. The pipeline strips ANSI, zero-width, and control chars, escapes markdown, and truncates with an ellipsis.
 
 ---
 
@@ -611,7 +611,7 @@ This tool uses your real Reddit account. Reddit can't tell the difference betwee
 
 **"STALE: live sha=..."** — The MCP host process is running an old build. Restart your MCP client (new session) after `npm run build`.
 
-**"429 Too Many Requests"** — You're hitting Reddit's rate limit. Wait a minute. The server paces paginated reads automatically; this usually means you fired too many parallel calls.
+**"429 Too Many Requests"** — You're hitting Reddit's rate limit. Wait a minute. The server paces paginated reads automatically. This usually means you fired too many parallel calls.
 
 ---
 
