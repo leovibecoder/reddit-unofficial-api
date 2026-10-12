@@ -92,7 +92,7 @@ npm run build
 | `reddit_get_comments` | Get all comments as a flat list |
 | `reddit_get_user` | Look up any user's profile, posts, comments, or your private tabs |
 | `reddit_get_subreddit` | Get subreddit info, rules, or browse posts |
-| `reddit_search` | Search across Reddit or within a subreddit |
+| `reddit_search` | Search within a subreddit (subreddit required) |
 | `reddit_get_inbox` | Read your messages, replies, and mentions |
 | `reddit_get_subscriptions` | List the subreddits you subscribe to |
 | `reddit_get_multis` | List your multis (custom feeds) and their member subreddits |
@@ -106,10 +106,14 @@ npm run build
 | `reddit_submit` | Create a new post (text or link) |
 | `reddit_vote` | Upvote, downvote, or unvote |
 | `reddit_save` | Save/unsave posts or comments |
+| `reddit_hide` | Hide/unhide posts (reversible) |
 | `reddit_send_message` | Send a private message |
 | `reddit_edit` | Edit your own content |
 | `reddit_delete` | Delete your own content |
 | `reddit_subscribe` | Join or leave a subreddit |
+| `reddit_multi_create` | Create a multi (custom feed) |
+| `reddit_multi_update` | Add/remove subreddits in one of your multis |
+| `reddit_multi_delete` | Delete one of your multis |
 
 ### Utility
 
@@ -212,19 +216,19 @@ Get subreddit metadata, rules, or browse its posts.
 
 ---
 
-### `reddit_search` — Search Reddit
+### `reddit_search` — Search within a subreddit
 
-Search posts across Reddit or within a subreddit.
+Search posts within a subreddit. Global search is not supported: unscoped search returns junk (CODING_STANDARDS §8.3), so `subreddit` is required.
 
 **Arguments:**
 - `query` (string, required): Search query
-- `subreddit` (string, optional): Limit to subreddit (highly recommended — unscoped search returns junk)
+- `subreddit` (string, required): Subreddit to search (without `r/`)
 - `sort` (enum, default `"relevance"`): `relevance`, `hot`, `top`, `new`, `comments`
 - `time` (enum, default `"all"`): `hour`, `day`, `week`, `month`, `year`, `all`
 - `limit` (number, default `25`): Max results
 - `compact` (boolean, default `true`): Compact projection. False returns raw payload.
 
-**Best practice:** Always provide `subreddit`. Use `sort: "relevance"` for topical questions, `sort: "top"` for best-of.
+**Best practice:** Use `sort: "relevance"` for topical questions, `sort: "top"` for best-of.
 
 ---
 
@@ -370,6 +374,67 @@ Read posts from one of your multis by name. Resolves the name against your multi
 
 ---
 
+### `reddit_hide` — Hide or unhide a post
+
+Hidden posts disappear from your feeds. Fully reversible.
+
+**Arguments:**
+- `thing_id` (string, required): Post fullname (`t3_`)
+- `unhide` (boolean, default `false`): Set true to unhide
+
+**Returns:** `{ success: true, action: "hidden" | "unhidden", thing_id }`
+
+---
+
+### `reddit_multi_create` — Create a multi (custom feed)
+
+**Arguments:**
+- `name` (string, required): Multi name — lowercase letters, numbers, underscores only (no hyphens or spaces)
+- `subreddits` (string[], required): Subreddit names (without `r/`)
+- `description` (string, optional): Multi description
+- `visibility` (enum, default `"private"`): `private`, `public`, `hidden`
+
+**Returns:** `{ success: true, name, subCount }`
+
+---
+
+### `reddit_multi_update` — Update a multi
+
+Add or remove member subreddits, or change the description.
+
+**Arguments:**
+- `multi` (string, required): Multi name (e.g. `favoritos`)
+- `add_subs` (string[], optional): Subreddit names to add
+- `remove_subs` (string[], optional): Subreddit names to remove
+- `description` (string, optional): New description
+
+**Returns:** `{ success: true, multi, before, after, added, removed }`
+
+---
+
+### `reddit_multi_delete` — Delete a multi
+
+Cannot be undone.
+
+**Arguments:**
+- `multi` (string, required): Multi name to delete
+
+**Returns:** `{ success: true, deleted }`
+
+---
+
+## Legacy write endpoints — removed, and why
+
+Block user (`/api/block`), friend (`/api/friend`), and report (`/api/report`) are legacy endpoints that modern Reddit has silently retired:
+
+- `/api/block` returns 404 (route removed)
+- `/api/friend type=friend` and `type=enemy` return 200 with no errors — but the friends and blocked lists never change
+- `/api/report` accepts a nonexistent target with 200 and no errors — same silent no-op signature
+
+A tool that reports success while doing nothing is worse than no tool, so none of the three ship. Use the Reddit UI for blocking, following, and reporting until a working replacement endpoint appears.
+
+---
+
 ## Compact Projection — What you get by default
 
 All listing tools (`get_post`, `get_user`, `get_subreddit`, `search`, `get_inbox`, `get_subscriptions`, `get_multis`, `get_multi_feed`) return a compact projection by default. This cuts the payload ~40x versus raw Reddit JSON.
@@ -434,6 +499,21 @@ All listing tools (`get_post`, `get_user`, `get_subreddit`, `search`, `get_inbox
 - **Paginated reads:** 2s between pages (enforced server-side for subscriptions, multi feeds)
 - **Reddit's native limit:** ~100 req/min authenticated — the pacing avoids tripping it
 - **Read operations:** No artificial delay, but don't fire parallel calls on a cold bridge
+
+## Response Cache
+
+Listing tools cache GET responses in memory (PRD 4 stage 1: rate-limit/cache check):
+
+| Category | TTL | Tools |
+|----------|-----|-------|
+| Post | 300s | `reddit_get_post`, `reddit_get_comments` |
+| Feed | 120s | `reddit_get_user`, `reddit_get_subreddit`, `reddit_search`, `reddit_get_subscriptions`, `reddit_get_multis`, `reddit_get_multi_feed` |
+| Inbox | 30s | `reddit_get_inbox` |
+
+- Session probes (`reddit_me`, `reddit_ensure_session`) are never cached
+- Any write operation (vote, comment, hide, save, subscribe, multi create/update/delete, etc.) clears the whole cache
+- Error responses are never cached
+- TTLs are env-overridable: `CACHE_TTL_SECONDS` (feed, 120), `CACHE_TTL_INBOX_SECONDS` (30), `CACHE_TTL_POST_SECONDS` (300)
 
 ---
 

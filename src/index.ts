@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { sanitizeText } from "./sanitize.js";
+import { TTLCache } from "./cache.js";
 
 // Reddit API helper — executes fetch() in Chrome DevTools context
 // Requires: chrome-devtools-mcp running + Reddit tab logged in
@@ -305,6 +306,12 @@ function compactModOf(data: any): any[] {
 
 // ==================== Reddit API Helpers ====================
 
+// Per-PRD 5.1 cache TTLs (seconds). Env-overridable.
+const TTL_FEED = Number(process.env.CACHE_TTL_SECONDS || "120");
+const TTL_INBOX = Number(process.env.CACHE_TTL_INBOX_SECONDS || "30");
+const TTL_POST = Number(process.env.CACHE_TTL_POST_SECONDS || "300");
+const cache = new TTLCache();
+
 async function getModhash(): Promise<string> {
   const result = await evalInReddit(`
     (async () => {
@@ -330,6 +337,16 @@ async function redditGet(path: string, params: Record<string, string> = {}): Pro
   `);
 }
 
+// Cached listing GET: PRD 4 stage 1 (rate-limit/cache check). Never caches
+// error payloads; session probes (me.json) stay on uncached redditGet.
+async function redditGetCached(path: string, params: Record<string, string> = {}, ttl: number = TTL_FEED): Promise<any> {
+  const hit = cache.get(path, params);
+  if (hit !== undefined) return hit;
+  const data = await redditGet(path, params);
+  if (!data?.error) cache.set(path, params, data, ttl);
+  return data;
+}
+
 async function redditPost(path: string, params: Record<string, string>): Promise<any> {
   await rateLimit();
   const modhash = await getModhash();
@@ -338,7 +355,7 @@ async function redditPost(path: string, params: Record<string, string>): Promise
 
   const body = new URLSearchParams(params).toString();
 
-  return evalInReddit(`
+  const result = evalInReddit(`
     (async () => {
       const resp = await fetch('https://www.reddit.com${path}', {
         method: 'POST',
@@ -350,6 +367,38 @@ async function redditPost(path: string, params: Record<string, string>): Promise
       try { return JSON.parse(text); } catch(e) { return { error: 'parse_error', raw: text.substring(0, 500) }; }
     })()
   `);
+  cache.clear(); // any write invalidates cached reads (scores, listings, state)
+  return result;
+}
+
+// JSON-body POST/PUT/DELETE for endpoints that take structured bodies
+// (multi create/update/delete). Reddit's multi API is quirky: the payload
+// rides a form-encoded `model` field (a stringified LabeledMulti), with the
+// modhash in the X-Modhash header. Plain JSON bodies return JSON_PARSE_ERROR.
+async function redditForm(
+  method: "POST" | "PUT" | "DELETE",
+  path: string,
+  params: Record<string, string> = {}
+): Promise<any> {
+  await rateLimit();
+  const modhash = await getModhash();
+  const body = new URLSearchParams(params).toString();
+
+  const result = evalInReddit(`
+    (async () => {
+      const resp = await fetch('https://www.reddit.com${path}', {
+        method: '${method}',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Modhash': '${modhash}' },
+        body: '${body.replace(/'/g, "\\'")}'
+      });
+      const text = await resp.text();
+      if (!text) return null; // DELETE returns empty body on success
+      try { return JSON.parse(text); } catch(e) { return { error: 'parse_error', status: resp.status, raw: text.substring(0, 500) }; }
+    })()
+  `);
+  cache.clear();
+  return result;
 }
 
 // ==================== MCP Tools ====================
@@ -380,7 +429,7 @@ server.tool(
     const match = url.match(/comments\/([a-z0-9]+)/);
     const postId = match ? match[1] : url;
 
-    const data = await redditGet(`/comments/${postId}.json`, { sort, limit: String(limit) });
+    const data = await redditGetCached(`/comments/${postId}.json`, { sort, limit: String(limit) }, TTL_POST);
 
     if (Array.isArray(data) && data.length >= 2) {
       if (!compact) {
@@ -407,7 +456,7 @@ server.tool(
     const match = url.match(/comments\/([a-z0-9]+)/);
     const postId = match ? match[1] : url;
 
-    const data = await redditGet(`/comments/${postId}.json`, { sort, limit: "500" });
+    const data = await redditGetCached(`/comments/${postId}.json`, { sort, limit: "500" }, TTL_POST);
 
     if (!Array.isArray(data) || data.length < 2) {
       return { content: [{ type: "text", text: "Could not fetch comments" }] };
@@ -467,36 +516,35 @@ server.tool(
     compact: z.boolean().default(true).describe("Project to sub/title/author/score/comments/body only. False returns the raw payload."),
   },
   async ({ username, type, limit, compact }) => {
-    const privateTypes = ["trophies", "friends", "moderator", "controversial", "upvoted", "downvoted", "saved", "hidden"];
     let path: string;
     if (type === "about") {
       path = `/user/${username}/about.json`;
-      const data = await redditGet(path);
+      const data = await redditGetCached(path, {}, TTL_FEED);
       if (!compact) return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
       // about.json returns a single t2 object, not a listing — return as-is
       return { content: [{ type: "text", text: JSON.stringify(data, null, 1) }] };
     }
     if (type === "trophies") {
       path = `/user/${username}/trophies.json`;
-      const data = await redditGet(path);
+      const data = await redditGetCached(path, {}, TTL_FEED);
       if (!compact) return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
       return { content: [{ type: "text", text: JSON.stringify(compactTrophies(data), null, 1) }] };
     }
     if (type === "friends") {
       path = `/prefs/friends.json`;
-      const data = await redditGet(path);
+      const data = await redditGetCached(path, {}, TTL_FEED);
       if (!compact) return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
       return { content: [{ type: "text", text: JSON.stringify(compactFriends(data), null, 1) }] };
     }
     if (type === "moderator") {
       path = `/subreddits/mine/moderator.json`;
-      const data = await redditGet(path);
+      const data = await redditGetCached(path, {}, TTL_FEED);
       if (!compact) return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
       return { content: [{ type: "text", text: JSON.stringify(compactModOf(data), null, 1) }] };
     }
     // listing types: overview, submitted, comments, controversial, upvoted, downvoted, saved, hidden
     path = `/user/${username}/${type}.json`;
-    const data = await redditGet(path, { limit: String(limit) });
+    const data = await redditGetCached(path, { limit: String(limit) }, TTL_FEED);
     return { content: [{ type: "text", text: listingOut(data, compact) }] };
   }
 );
@@ -515,29 +563,26 @@ server.tool(
     const path = ["about", "rules"].includes(type)
       ? `/r/${subreddit}/about/${type === "about" ? "" : "rules"}.json`
       : `/r/${subreddit}/${type}.json`;
-    const data = await redditGet(path, { limit: String(limit), t: time });
+    const data = await redditGetCached(path, { limit: String(limit), t: time }, TTL_FEED);
     return { content: [{ type: "text", text: listingOut(data, compact) }] };
   }
 );
 
 server.tool(
   "reddit_search",
-  "Search Reddit posts (compact projection by default)",
+  "Search Reddit posts within a subreddit (compact projection by default). Subreddit is required: global search returns junk (CODING_STANDARDS 8.3).",
   {
     query: z.string().describe("Search query"),
-    subreddit: z.string().optional().describe("Limit to subreddit (optional)"),
+    subreddit: z.string().describe("Subreddit to search (required, without r/)"),
     sort: z.enum(["relevance", "hot", "top", "new", "comments"]).default("relevance"),
     time: z.enum(["hour", "day", "week", "month", "year", "all"]).default("all"),
     limit: z.number().default(25),
     compact: z.boolean().default(true).describe("Project to sub/title/author/score/comments/body only. False returns the raw payload."),
   },
   async ({ query, subreddit, sort, time, limit, compact }) => {
-    const path = subreddit
-      ? `/r/${subreddit}/search.json`
-      : `/search.json`;
-    const params: Record<string, string> = { q: query, sort, t: time, limit: String(limit) };
-    if (subreddit) params.restrict_sr = "on";
-    const data = await redditGet(path, params);
+    const path = `/r/${subreddit}/search.json`;
+    const params: Record<string, string> = { q: query, sort, t: time, limit: String(limit), restrict_sr: "on" };
+    const data = await redditGetCached(path, params, TTL_FEED);
     return { content: [{ type: "text", text: listingOut(data, compact) }] };
   }
 );
@@ -551,7 +596,7 @@ server.tool(
     compact: z.boolean().default(true).describe("Project to sub/title/author/score/comments/body only. False returns the raw payload."),
   },
   async ({ type, limit, compact }) => {
-    const data = await redditGet(`/message/${type}.json`, { limit: String(limit) });
+    const data = await redditGetCached(`/message/${type}.json`, { limit: String(limit) }, TTL_INBOX);
     return { content: [{ type: "text", text: listingOut(data, compact) }] };
   }
 );
@@ -573,7 +618,7 @@ server.tool(
       if (page > 0) await paceReads();
       const params: Record<string, string> = { limit: String(Math.min(perPage, cap - all.length)) };
       if (after) params.after = after;
-      const data = await redditGet("/subreddits/mine/subscriber.json", params);
+      const data = await redditGetCached("/subreddits/mine/subscriber.json", params, TTL_FEED);
       if (data?.error) {
         return { content: [{ type: "text", text: JSON.stringify({ error: data.error, statusText: data.statusText }) }] };
       }
@@ -600,7 +645,7 @@ server.tool(
     compact: z.boolean().default(true).describe("Project to name/path/visibility/subreddit names only. False returns the raw payload."),
   },
   async ({ compact }) => {
-    const data = await redditGet("/api/multi/mine.json");
+    const data = await redditGetCached("/api/multi/mine.json", {}, TTL_FEED);
     if (!Array.isArray(data)) {
       return { content: [{ type: "text", text: JSON.stringify({ error: data?.error || "unexpected response", statusText: data?.statusText }) }] };
     }
@@ -620,7 +665,7 @@ server.tool(
   async ({ multi, limit, compact }) => {
     let path = multi.trim();
     if (!path.startsWith("/user/")) {
-      const mine = await redditGet("/api/multi/mine.json");
+      const mine = await redditGetCached("/api/multi/mine.json", {}, TTL_FEED);
       if (!Array.isArray(mine)) {
         return { content: [{ type: "text", text: JSON.stringify({ error: "could not list your multis", statusText: mine?.statusText }) }] };
       }
@@ -646,7 +691,7 @@ server.tool(
       if (page > 0) await paceReads();
       const params: Record<string, string> = { limit: String(Math.min(perPage, cap - all.length)) };
       if (after) params.after = after;
-      const data = await redditGet(`${path}.json`, params);
+      const data = await redditGetCached(`${path}.json`, params, TTL_FEED);
       if (data?.error) {
         return { content: [{ type: "text", text: JSON.stringify({ error: data.error, statusText: data.statusText }) }] };
       }
@@ -789,6 +834,108 @@ server.tool(
     const action = unsubscribe ? "unsub" : "sub";
     await redditPost("/api/subscribe", { action, sr_name: subreddit });
     return { content: [{ type: "text", text: JSON.stringify({ success: true, action, subreddit }) }] };
+  }
+);
+
+server.tool(
+  "reddit_hide",
+  "Hide or unhide a post (hidden posts disappear from your feeds; reversible)",
+  {
+    thing_id: z.string().describe("Post fullname (t3_)"),
+    unhide: z.boolean().default(false).describe("Set true to unhide"),
+  },
+  async ({ thing_id, unhide }) => {
+    const path = unhide ? "/api/unhide" : "/api/hide";
+    await redditPost(path, { id: thing_id });
+    return { content: [{ type: "text", text: JSON.stringify({ success: true, action: unhide ? "unhidden" : "hidden", thing_id }) }] };
+  }
+);
+
+server.tool(
+  "reddit_multi_create",
+  "Create a new multi (custom feed) with member subreddits",
+  {
+    name: z.string().describe("Multi name: lowercase letters, numbers, underscores only (no hyphens/spaces)"),
+    subreddits: z.array(z.string()).describe("Subreddit names (without r/)"),
+    description: z.string().optional().describe("Multi description"),
+    visibility: z.enum(["private", "public", "hidden"]).default("private"),
+  },
+  async ({ name, subreddits, description, visibility }) => {
+    const safeName = name.trim().toLowerCase().replace(/[^a-z0-9_]/g, "_");
+    const me = await redditGet("/api/me.json");
+    const owner = me?.data?.name;
+    if (!owner) return { content: [{ type: "text", text: JSON.stringify({ error: "NOT-LOGGED-IN" }) }] };
+
+    const model: Record<string, any> = {
+      name: safeName,
+      path: `user:${owner}/m/${safeName}`,
+      visibility,
+      subreddits: subreddits.map((s) => ({ name: s })),
+    };
+    if (description) model.description_md = description;
+    const result = await redditForm("PUT", `/api/multi/user/${owner}/m/${safeName}`, {
+      model: JSON.stringify(model),
+      api_type: "json",
+    });
+    const ok = result?.kind === "LabeledMulti" && !result?.error && !result?.reason;
+    return { content: [{ type: "text", text: JSON.stringify({ success: ok, name: safeName, subCount: subreddits.length, result: ok ? "created" : result }) }] };
+  }
+);
+
+server.tool(
+  "reddit_multi_update",
+  "Update one of your multis: add or remove member subreddits, change description",
+  {
+    multi: z.string().describe("Multi name (e.g. 'favoritos')"),
+    add_subs: z.array(z.string()).optional().describe("Subreddit names to add"),
+    remove_subs: z.array(z.string()).optional().describe("Subreddit names to remove"),
+    description: z.string().optional().describe("New description"),
+  },
+  async ({ multi, add_subs, remove_subs, description }) => {
+    const me = await redditGet("/api/me.json");
+    const owner = me?.data?.name;
+    if (!owner) return { content: [{ type: "text", text: JSON.stringify({ error: "NOT-LOGGED-IN" }) }] };
+
+    const safeName = multi.trim().toLowerCase();
+    // Current membership
+    const current = await redditGet(`/api/multi/user/${owner}/m/${safeName}`);
+    if (current?.error || current?.reason) {
+      return { content: [{ type: "text", text: JSON.stringify({ error: `could not read multi '${safeName}'`, detail: current?.reason || current?.error }) }] };
+    }
+    const names: string[] = ((current?.data?.subreddits ?? current?.subreddits) ?? []).map((s: any) => s.name);
+    const add = add_subs ?? [];
+    const remove = remove_subs ?? [];
+    const next = [...new Set([...names.filter((n) => !remove.includes(n)), ...add])];
+
+    const model: Record<string, any> = {
+      name: safeName,
+      path: `user:${owner}/m/${safeName}`,
+      subreddits: next.map((s) => ({ name: s })),
+    };
+    if (description) model.description_md = description;
+    const result = await redditForm("PUT", `/api/multi/user/${owner}/m/${safeName}`, {
+      model: JSON.stringify(model),
+      api_type: "json",
+    });
+    const ok = result?.kind === "LabeledMulti" && !result?.error && !result?.reason;
+    return { content: [{ type: "text", text: JSON.stringify({ success: ok, multi: safeName, before: names.length, after: next.length, added: add, removed: remove.filter((r) => names.includes(r)) }) }] };
+  }
+);
+
+server.tool(
+  "reddit_multi_delete",
+  "Delete one of your multis (cannot be undone)",
+  {
+    multi: z.string().describe("Multi name to delete"),
+  },
+  async ({ multi }) => {
+    const me = await redditGet("/api/me.json");
+    const owner = me?.data?.name;
+    if (!owner) return { content: [{ type: "text", text: JSON.stringify({ error: "NOT-LOGGED-IN" }) }] };
+    const safeName = multi.trim().toLowerCase();
+    const result = await redditForm("DELETE", `/api/multi/user/${owner}/m/${safeName}`);
+    const failed = result?.reason || result?.error;
+    return { content: [{ type: "text", text: JSON.stringify({ success: !failed, deleted: safeName, detail: failed || "ok" }) }] };
   }
 );
 

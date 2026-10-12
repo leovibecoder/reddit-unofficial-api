@@ -3,3 +3,4 @@ build/
 *.tsbuildinfo
 CLAUDE.local.md
 thoughts/
+err.log
