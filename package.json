@@ -11,7 +11,9 @@
     "build": "tsc && git rev-parse HEAD > build/BUILD_SHA",
     "dev": "tsx src/index.ts",
     "start": "node build/index.js",
-    "test": "node test/sanitize.test.mjs && node test/cache.test.mjs"
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
@@ -19,8 +21,10 @@
   },
   "devDependencies": {
     "@types/node": "^22.15.3",
+    "@vitest/coverage-v8": "^5.0.4",
     "tsx": "^4.19.4",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "vitest": "^5.0.4"
   },
   "keywords": [
     "reddit",
