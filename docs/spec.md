@@ -31,6 +31,7 @@ The MCP server is a thin wrapper that:
 | Tool | Description |
 |------|-------------|
 | `reddit_get_post` | Get a post and its comments by URL or ID |
+| `reddit_get_posts` | Get several posts + top comments in one paced call (max 25) |
 | `reddit_get_comments` | Get all comments for a post (full tree, nested) |
 | `reddit_get_user` | Get user profile, posts, or comments |
 | `reddit_get_subreddit` | Get subreddit info, rules, posts |

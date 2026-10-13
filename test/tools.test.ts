@@ -158,4 +158,14 @@ describe.skipIf(!existsSync(BUILD_JS))("bridge tools (needs build/index.js — r
     const res = await toolCall(client, "reddit_mark_notifications_as_read", { notification_ids: "t4_abc" });
     expect(res.isError).toBe(true);
   });
+
+  it("batch posts rejects an empty id list", async () => {
+    const res = await toolCall(client, "reddit_get_posts", { ids: [] });
+    expect(res.isError).toBe(true);
+  });
+
+  it("batch posts rejects more than 25 ids", async () => {
+    const res = await toolCall(client, "reddit_get_posts", { ids: Array(26).fill("1sdv3lo") });
+    expect(res.isError).toBe(true);
+  });
 });

@@ -89,6 +89,7 @@ npm run build
 |------|-------------|
 | `reddit_me` | Get current logged-in user info |
 | `reddit_get_post` | Get a post and its comments |
+| `reddit_get_posts` | Get several posts + top comments in one paced call (max 25) |
 | `reddit_get_comments` | Get all comments as a flat list |
 | `reddit_get_user` | Look up any user's profile, posts, comments, or your private tabs |
 | `reddit_get_subreddit` | Get subreddit info, rules, or browse posts |
@@ -158,6 +159,20 @@ Fetch a post by URL or ID, with its comment tree.
 - `compact` (boolean, default `true`): Compact projection (sub, title, author, score, comments, body snippet). False returns raw payload.
 
 **Returns:** Object with `post` and `comments` arrays. Compact mode includes `link` (full permalink) on every item.
+
+---
+
+### `reddit_get_posts` — Batch post details (paced)
+
+One call for many posts, paced server-side (2s gaps). Use this instead of N parallel `reddit_get_post` calls when curating a feed.
+
+**Arguments:**
+- `ids` (string[], required, max `25`): Post URLs or IDs, returned in input order
+- `sort` (enum, default `"top"`): Comment sort — `top`, `new`, `best`, `controversial`, `old`, `qa`
+- `limit` (number, default `10`, max `50`): Max comments per post (`0` = post only)
+- `compact` (boolean, default `true`): Same projection as `reddit_get_post`
+
+**Returns:** Array of `{id, post, comments}` in input order; per-item failures come back as `{id, error}` without failing the batch.
 
 ---
 
@@ -475,6 +490,9 @@ All listing tools (`get_post`, `get_user`, `get_subreddit`, `search`, `get_inbox
 - `comments` — Number of comments
 - `body` — Body text (truncated to 280 chars)
 - `url` — External URL if different from permalink
+- `media` — What a click opens: `gallery` | `video` | `image` | `text` | `link` (structural, safe to branch on)
+- `preview` — Selftext snippet (text posts, 200 chars) or gallery count — absent when Reddit sends no source text
+- `thumb` — Thumbnail URL, only when Reddit sends an http thumbnail
 
 **Subreddit fields (get_subscriptions):**
 - `kind` — `t5`
@@ -530,7 +548,7 @@ Listing tools cache GET responses in memory (PRD 4 stage 1: rate-limit/cache che
 
 | Category | TTL | Tools |
 |----------|-----|-------|
-| Post | 300s | `reddit_get_post`, `reddit_get_comments` |
+| Post | 300s | `reddit_get_post`, `reddit_get_posts`, `reddit_get_comments` |
 | Feed | 120s | `reddit_get_home_feed`, `reddit_get_user`, `reddit_get_subreddit`, `reddit_search`, `reddit_get_subscriptions`, `reddit_get_multis`, `reddit_get_multi_feed` |
 | Inbox | 30s | `reddit_get_inbox` |
 

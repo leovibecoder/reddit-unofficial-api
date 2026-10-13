@@ -178,6 +178,19 @@ async function evalInReddit(script: string): Promise<any> {
 // actually reads. Pass compact=false for the raw payload.
 // All text fields pass sanitizeText (per docs/SANITIZATION.md) before
 // truncation. Structural fields (score, comments, link) stay untouched.
+// Preview fields (media, preview, thumb) tell the reader what a click
+// opens, so curators rarely need a follow-up fetch per item (retro 2026-10-13).
+function mediaKind(d: any): "gallery" | "video" | "image" | "text" | "link" {
+  if (d?.is_gallery === true || Array.isArray(d?.gallery_data?.items)) return "gallery";
+  if (d?.is_video === true || d?.post_hint === "hosted:video" || d?.post_hint === "rich:video") return "video";
+  if (d?.post_hint === "image") return "image";
+  if (d?.is_self === true || d?.post_hint === "self") return "text";
+  const u = String(d?.url || "");
+  if (/\.(png|jpe?g|gif|webp)(\?|#|$)/i.test(u) || u.includes("i.redd.it")) return "image";
+  if (u.includes("v.redd.it")) return "video";
+  return "link";
+}
+
 function compactChildren(data: any): any[] {
   const kids: any[] = data?.data?.children ?? data?.children ?? [];
   return kids.map((c: any) => {
@@ -193,6 +206,19 @@ function compactChildren(data: any): any[] {
     if (typeof d?.num_comments === "number") item.comments = d.num_comments;
     if (d?.body) item.body = sanitizeText(d.body, 280);
     if (d?.url && d.url !== d?.permalink && d.url !== item.link) item.url = d.url;
+    // What-click-opens preview: media kind is structural (never sanitized,
+    // so agents can branch on it); preview is sanitized selftext (text posts)
+    // or a gallery count; thumb is a raw thumbnail URL when Reddit sends one.
+    const media = mediaKind(d);
+    item.media = media;
+    if (typeof d?.selftext === "string" && d.selftext.trim()) {
+      item.preview = sanitizeText(d.selftext, 200);
+    } else if (media === "gallery") {
+      const n = d?.gallery_data?.items?.length;
+      item.preview = typeof n === "number" ? `${n} images` : "gallery";
+    }
+    const thumb = typeof d?.thumbnail === "string" && d.thumbnail.startsWith("http") ? d.thumbnail : "";
+    if (thumb) item.thumb = thumb;
     return item;
   });
 }
@@ -485,6 +511,57 @@ server.tool(
     extract(data[1].data.children);
 
     return { content: [{ type: "text", text: JSON.stringify(flat, null, 2) }] };
+  }
+);
+
+// Batch post details: one call for many posts, paced server-side (2s gaps,
+// same paceReads as paginated reads). Replaces N parallel reddit_get_post
+// calls when curating a feed (retro 2026-10-13: 46 parallel fetches for
+// 50 feed items). Results keep input order; per-item errors stay local.
+server.tool(
+  "reddit_get_posts",
+  "Get several Reddit posts and their top comments in one paced call (compact projection by default)",
+  {
+    ids: z.array(z.string()).min(1).max(25).describe("Post IDs or URLs (max 25), in the order to return"),
+    sort: z.enum(["top", "new", "best", "controversial", "old", "qa"]).default("top").describe("Comment sort order"),
+    limit: z.number().min(0).max(50).default(10).describe("Max comments per post (0 = post only)"),
+    compact: z.boolean().default(true).describe("Project to sub/title/author/score/comments/body only. False returns the raw payload."),
+  },
+  async ({ ids, sort, limit, compact }) => {
+    const out: any[] = [];
+    for (let i = 0; i < ids.length; i++) {
+      if (i > 0) await paceReads();
+      const raw = ids[i];
+      const match = raw.match(/comments\/([a-z0-9]+)/);
+      const postId = match ? match[1] : raw;
+      if (!/^[a-z0-9]+$/i.test(postId)) {
+        out.push({ id: raw, error: `invalid post ID: '${raw}'` });
+        continue;
+      }
+      const data = await redditGetCached(`/comments/${postId}.json`, { sort, limit: String(Math.max(limit, 1)) }, TTL_POST);
+      if (data?.error) {
+        out.push({ id: postId, error: data.error, statusText: data.statusText });
+        continue;
+      }
+      if (Array.isArray(data) && data.length >= 2) {
+        if (!compact) {
+          out.push({
+            id: postId,
+            post: data[0]?.data?.children?.[0]?.data,
+            comments: (data[1]?.data?.children?.map((c: any) => c.data) || []).slice(0, limit),
+          });
+        } else {
+          out.push({
+            id: postId,
+            post: compactChildren(data[0])[0],
+            comments: compactChildren(data[1]).slice(0, limit),
+          });
+        }
+      } else {
+        out.push({ id: postId, error: "unexpected response" });
+      }
+    }
+    return { content: [{ type: "text", text: JSON.stringify(out, null, 1) }] };
   }
 );
 

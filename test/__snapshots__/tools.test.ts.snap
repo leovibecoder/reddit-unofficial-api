@@ -12,6 +12,7 @@ exports[`bridge tools (needs build/index.js — run npm run build first) > regis
   "reddit_get_multi_feed",
   "reddit_get_multis",
   "reddit_get_post",
+  "reddit_get_posts",
   "reddit_get_subreddit",
   "reddit_get_subscriptions",
   "reddit_get_user",
