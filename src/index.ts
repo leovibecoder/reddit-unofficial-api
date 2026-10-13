@@ -364,7 +364,7 @@ async function redditPost(path: string, params: Record<string, string>): Promise
         body: '${body.replace(/'/g, "\\'")}'
       });
       const text = await resp.text();
-      try { return JSON.parse(text); } catch(e) { return { error: 'parse_error', raw: text.substring(0, 500) }; }
+      try { return JSON.parse(text); } catch(e) { return { error: 'parse_error', status: resp.status, raw: text.substring(0, 500) }; }
     })()
   `);
   cache.clear(); // any write invalidates cached reads (scores, listings, state)
@@ -839,7 +839,6 @@ server.tool(
     }
     const idsString = notification_ids.join(",");
     await redditPost("/api/read_message", { ids: idsString });
-    cache.clear(); // any write invalidates cached reads
     return { content: [{ type: "text", text: JSON.stringify({ success: true, count: notification_ids.length }) }] };
   }
 );
