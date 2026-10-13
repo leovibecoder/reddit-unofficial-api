@@ -828,6 +828,23 @@ server.tool(
 );
 
 server.tool(
+  "reddit_mark_notifications_as_read",
+  "Mark specified Reddit notifications as read",
+  {
+    notification_ids: z.array(z.string()).describe("List of notification fullnames (t4_...) to mark as read"),
+  },
+  async ({ notification_ids }) => {
+    if (notification_ids.length === 0) {
+      return { content: [{ type: "text", text: JSON.stringify({ success: true, count: 0 }) }] };
+    }
+    const idsString = notification_ids.join(",");
+    await redditPost("/api/read_message", { ids: idsString });
+    cache.clear(); // any write invalidates cached reads
+    return { content: [{ type: "text", text: JSON.stringify({ success: true, count: notification_ids.length }) }] };
+  }
+);
+
+server.tool(
   "reddit_edit",
   "Edit your own post or comment",
   {

@@ -109,6 +109,7 @@ npm run build
 | `reddit_save` | Save/unsave posts or comments |
 | `reddit_hide` | Hide/unhide posts (reversible) |
 | `reddit_send_message` | Send a private message |
+| `reddit_mark_notifications_as_read` | Mark specified notifications as read |
 | `reddit_edit` | Edit your own content |
 | `reddit_delete` | Delete your own content |
 | `reddit_subscribe` | Join or leave a subreddit |
@@ -359,6 +360,14 @@ Read posts from one of your multis by name. Resolves the name against your multi
 
 ---
 
+### `reddit_mark_notifications_as_read` — Mark specified notifications as read
+
+**Arguments:**
+- `notification_ids` (string[], required): List of notification fullnames (t4_...) to mark as read
+
+**Returns:** { success: true, count: number }
+
+---
 ### `reddit_edit` — Edit your own post or comment
 
 **Arguments:**
