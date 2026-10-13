@@ -259,8 +259,9 @@ Get the logged-in account's home feed: posts from your subscriptions, exactly as
 
 **Arguments:**
 - `sort` (enum, default `"hot"`): `hot`, `new`, `top`, `rising`
-- `limit` (number, default `15`): Max posts (1–50)
-- `time` (enum, optional, default `"day"`): Time filter — `hour`, `day`, `week`, `month`, `year`, `all`. Only used when `sort` is `top`.
+- `limit` (number, default `15`): Max posts (1-50). The server pages through the listing (2s between pages) up to this cap.
+- `time` (enum, optional): Time filter — `hour`, `day`, `week`, `month`, `year`, `all`. Only valid when `sort` is `top` (defaults to `day` there); passing it with any other sort returns an error.
+- `after_id` (string, optional): Fullname cursor (`t3_...`) to page from — for reading past the first page.
 
 **Compact output:** Standard item projection (sub, title, author, score, comments, link, body snippet).
 
@@ -363,9 +364,9 @@ Read posts from one of your multis by name. Resolves the name against your multi
 ### `reddit_mark_notifications_as_read` — Mark specified notifications as read
 
 **Arguments:**
-- `notification_ids` (string[], required): List of notification fullnames (t4_...) to mark as read
+- `notification_ids` (string[], required): List of notification fullnames (`t4_...`) to mark as read. IDs not matching `t4_...` are rejected before any write.
 
-**Returns:** { success: true, count: number }
+**Returns:** `{ success: true, count: N }` on success; `{ success: false, count: 0, error, status? }` when the write fails — a failed POST never reads as success.
 
 ---
 ### `reddit_edit` — Edit your own post or comment

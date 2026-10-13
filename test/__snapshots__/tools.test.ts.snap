@@ -1,6 +1,6 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`tool registration (needs build/index.js — run npm run build first) > registers the documented tools 1`] = `
+exports[`bridge tools (needs build/index.js — run npm run build first) > registers the documented tools 1`] = `
 [
   "reddit_comment",
   "reddit_delete",

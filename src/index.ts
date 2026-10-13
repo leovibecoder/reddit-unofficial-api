@@ -490,29 +490,54 @@ server.tool(
 
 // ==== Home feed ====
 
+// Sort → path for the logged-in home feed. Single lookup instead of an
+// if-cascade (sibling tools interpolate sort into larger paths, so a
+// shared helper would over-fit; this map covers the pure-sort case).
+const HOME_FEED_PATHS: Record<"hot" | "new" | "top" | "rising", string> = {
+  hot: "/hot.json",
+  new: "/new.json",
+  top: "/top.json",
+  rising: "/rising.json",
+};
+
 server.tool(
   "reddit_get_home_feed",
   "Get the logged-in user's home feed (compact by default)",
   {
     sort: z.enum(["hot", "new", "top", "rising"]).default("hot"),
     limit: z.number().min(1).max(50).default(15),
-    time: z.enum(["hour", "day", "week", "month", "year", "all"]).default("day").optional(),
+    time: z.enum(["hour", "day", "week", "month", "year", "all"]).optional().describe("Time filter — only valid when sort is 'top' (defaults to 'day')"),
+    after_id: z.string().optional().describe("Fullname cursor (t3_...) to page from — for reading past the first page"),
   },
-  async ({ sort, limit, time }) => {
-    let path = "";
-    const params: Record<string, string> = { limit: String(limit) };
-    if (sort === "rising") {
-      path = "/rising.json";
-    } else if (sort === "hot") {
-      path = "/hot.json";
-    } else if (sort === "new") {
-      path = "/new.json";
-    } else if (sort === "top") {
-      path = "/top.json";
-      params.t = time ?? "day";
+  async ({ sort, limit, time, after_id }) => {
+    if (sort !== "top" && time !== undefined) {
+      return { content: [{ type: "text", text: JSON.stringify({ error: "time applies only when sort is 'top'" }) }] };
     }
-    const data = await redditGetCached(path, params, TTL_FEED);
-    return { content: [{ type: "text", text: JSON.stringify(compactChildren(data), null, 1) }] };
+    const path = HOME_FEED_PATHS[sort];
+    const base: Record<string, string> = {};
+    if (sort === "top") base.t = time ?? "day";
+    // Server-side accumulator (PRD 4.1 after_id + agreed pacing): page
+    // through the listing up to limit, 2s between pages. The caller never
+    // chains cursors by hand; after_id only resumes a previous read.
+    const cap = Math.min(Math.max(limit, 1), 50);
+    const perPage = 25;
+    const all: any[] = [];
+    let after = after_id ?? "";
+    for (let page = 0; page < 4 && all.length < cap; page++) {
+      if (page > 0) await paceReads();
+      const params: Record<string, string> = { ...base, limit: String(Math.min(perPage, cap - all.length)) };
+      if (after) params.after = after;
+      const data = await redditGetCached(path, params, TTL_FEED);
+      if (data?.error) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: data.error, statusText: data.statusText }) }] };
+      }
+      const kids: any[] = data?.data?.children ?? [];
+      all.push(...kids);
+      after = data?.data?.after || "";
+      if (!after) break;
+    }
+    const out = { data: { children: all.slice(0, cap) } };
+    return { content: [{ type: "text", text: JSON.stringify(compactChildren(out), null, 1) }] };
   }
 );
 
@@ -837,8 +862,36 @@ server.tool(
     if (notification_ids.length === 0) {
       return { content: [{ type: "text", text: JSON.stringify({ success: true, count: 0 }) }] };
     }
-    const idsString = notification_ids.join(",");
-    await redditPost("/api/read_message", { ids: idsString });
+    const bad = notification_ids.filter((id) => !/^t4_[a-z0-9]+$/i.test(id));
+    if (bad.length > 0) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: false, count: 0, error: `invalid notification IDs (expected t4_...): ${bad.join(", ")}` }),
+          },
+        ],
+      };
+    }
+    // Surface the write result: a failed POST (400/401/parse_error) must
+    // never read as success (CODING_STANDARDS §6 round-trip rule).
+    const result = await redditPost("/api/read_message", { ids: notification_ids.join(",") });
+    const apiErrors = result?.json?.errors;
+    if (result?.error || (Array.isArray(apiErrors) && apiErrors.length > 0)) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              success: false,
+              count: 0,
+              error: result?.error ?? apiErrors,
+              ...(result?.status !== undefined ? { status: result.status } : {}),
+            }),
+          },
+        ],
+      };
+    }
     return { content: [{ type: "text", text: JSON.stringify({ success: true, count: notification_ids.length }) }] };
   }
 );
