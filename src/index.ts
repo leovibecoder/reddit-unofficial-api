@@ -488,6 +488,35 @@ server.tool(
   }
 );
 
+// ==== Home feed ====
+
+server.tool(
+  "reddit_get_home_feed",
+  "Get the logged-in user's home feed (compact by default)",
+  {
+    sort: z.enum(["hot", "new", "top", "rising"]).default("hot"),
+    limit: z.number().min(1).max(50).default(15),
+    time: z.enum(["hour", "day", "week", "month", "year", "all"]).default("day").optional(),
+  },
+  async ({ sort, limit, time }) => {
+    let path = "";
+    const params: Record<string, string> = { limit: String(limit) };
+    if (sort === "rising") {
+      path = "/rising.json";
+    } else if (sort === "hot") {
+      path = "/hot.json";
+    } else if (sort === "new") {
+      path = "/new.json";
+    } else if (sort === "top") {
+      path = "/top.json";
+      params.t = time ?? "day";
+    }
+    const data = await redditGetCached(path, params, TTL_FEED);
+    return { content: [{ type: "text", text: JSON.stringify(compactChildren(data), null, 1) }] };
+  }
+);
+
+
 server.tool(
   "reddit_get_user",
   "Get a Reddit user's profile, posts, or comments (compact projection by default)",

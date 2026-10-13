@@ -94,6 +94,7 @@ npm run build
 | `reddit_get_subreddit` | Get subreddit info, rules, or browse posts |
 | `reddit_search` | Search within a subreddit (subreddit required) |
 | `reddit_get_inbox` | Read your messages, replies, and mentions |
+| `reddit_get_home_feed` | Get your personalized home feed (hot/new/top/rising) |
 | `reddit_get_subscriptions` | List the subreddits you subscribe to |
 | `reddit_get_multis` | List your multis (custom feeds) and their member subreddits |
 | `reddit_get_multi_feed` | Read posts from one of your multis by name |
@@ -248,6 +249,19 @@ Read your Reddit messages: inbox, unread, sent, comment replies, post replies, o
 - `compact` (boolean, default `true`): Compact projection. False returns raw payload.
 
 **Compact output:** Includes `subject` field for message-type items (comments, selfreply, mentions use `title` instead).
+
+---
+
+### `reddit_get_home_feed` — Your personalized home feed
+
+Get the logged-in account's home feed: posts from your subscriptions, exactly as reddit.com shows them.
+
+**Arguments:**
+- `sort` (enum, default `"hot"`): `hot`, `new`, `top`, `rising`
+- `limit` (number, default `15`): Max posts (1–50)
+- `time` (enum, optional, default `"day"`): Time filter — `hour`, `day`, `week`, `month`, `year`, `all`. Only used when `sort` is `top`.
+
+**Compact output:** Standard item projection (sub, title, author, score, comments, link, body snippet).
 
 ---
 
@@ -437,7 +451,7 @@ A tool that reports success while doing nothing is worse than no tool, so none o
 
 ## Compact Projection — What you get by default
 
-All listing tools (`get_post`, `get_user`, `get_subreddit`, `search`, `get_inbox`, `get_subscriptions`, `get_multis`, `get_multi_feed`) return a compact projection by default. This cuts the payload ~40x versus raw Reddit JSON.
+All listing tools (`get_post`, `get_user`, `get_subreddit`, `search`, `get_inbox`, `get_home_feed`, `get_subscriptions`, `get_multis`, `get_multi_feed`) return a compact projection by default. This cuts the payload ~40x versus raw Reddit JSON.
 
 **Standard item fields (posts/comments):**
 - `kind` — Reddit kind (`t1`=comment, `t3`=post, `t5`=subreddit)
@@ -507,7 +521,7 @@ Listing tools cache GET responses in memory (PRD 4 stage 1: rate-limit/cache che
 | Category | TTL | Tools |
 |----------|-----|-------|
 | Post | 300s | `reddit_get_post`, `reddit_get_comments` |
-| Feed | 120s | `reddit_get_user`, `reddit_get_subreddit`, `reddit_search`, `reddit_get_subscriptions`, `reddit_get_multis`, `reddit_get_multi_feed` |
+| Feed | 120s | `reddit_get_home_feed`, `reddit_get_user`, `reddit_get_subreddit`, `reddit_search`, `reddit_get_subscriptions`, `reddit_get_multis`, `reddit_get_multi_feed` |
 | Inbox | 30s | `reddit_get_inbox` |
 
 - Session probes (`reddit_me`, `reddit_ensure_session`) are never cached
