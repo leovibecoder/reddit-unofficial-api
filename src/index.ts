@@ -5,6 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { sanitizeText } from "./sanitize.js";
 import { TTLCache } from "./cache.js";
+import { extractUrl, extractionConfigured, extractionHealthy } from "./extract.js";
 
 // Reddit API helper — executes fetch() in Chrome DevTools context
 // Requires: chrome-devtools-mcp running + Reddit tab logged in
@@ -1164,6 +1165,37 @@ server.tool(
       state.error = e.message;
       return { content: [{ type: "text", text: JSON.stringify(state, null, 2) }] };
     }
+  }
+);
+
+// --- External content extraction (PRD 7.1, ADR 0001, N-001) ---
+// Opt-in: curators call this only for link posts worth reading in full.
+// Disabled by default (CRAWL4AI_ENABLED=false, no key) — responds with a
+// clear hint instead of failing silently. Output is sanitizeText-gated.
+server.tool(
+  "reddit_extract",
+  "Extract readable markdown from an external URL (a link post's target article) to read it without fetching raw HTML. Off by default: set CRAWL4AI_ENABLED=true and CRAWL4AI_KEY.",
+  {
+    url: z.string().describe("External article URL (the post's `url` field, not the Reddit permalink)"),
+    max_chars: z.number().default(2000).describe("Truncate extracted markdown to this many characters"),
+  },
+  async ({ url, max_chars }) => {
+    if (!extractionConfigured()) {
+      return {
+        content: [{ type: "text", text: "extraction disabled: set CRAWL4AI_ENABLED=true and CRAWL4AI_KEY in the bridge environment" }],
+      };
+    }
+    if (!extractionHealthy()) {
+      return { content: [{ type: "text", text: "extraction unhealthy: 3 consecutive backend failures; retry after bridge restart" }] };
+    }
+    const result = await extractUrl(url, { log: (m) => console.error(m) });
+    if (!result) {
+      return { content: [{ type: "text", text: `extraction failed for ${url}; use reddit_get_post for the Reddit-native content` }] };
+    }
+    const markdown = sanitizeText(result.markdown, max_chars);
+    return {
+      content: [{ type: "text", text: JSON.stringify({ url, backend: result.backend, chars: markdown.length, markdown }, null, 1) }],
+    };
   }
 );
 

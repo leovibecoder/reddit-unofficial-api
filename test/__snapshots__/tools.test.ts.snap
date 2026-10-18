@@ -6,6 +6,7 @@ exports[`bridge tools (needs build/index.js — run npm run build first) > regis
   "reddit_delete",
   "reddit_edit",
   "reddit_ensure_session",
+  "reddit_extract",
   "reddit_get_comments",
   "reddit_get_home_feed",
   "reddit_get_inbox",
