@@ -8,19 +8,31 @@
     "reddit-unofficial-api": "build/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && { git rev-parse HEAD; find src package.json package-lock.json tsconfig.json -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1; } > build/BUILD_SHA",
     "dev": "tsx src/index.ts",
-    "start": "node build/index.js"
+    "start": "node build/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0",
-    "@modelcontextprotocol/sdk": "^1.12.1"
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
-    "typescript": "^5.8.3",
+    "@types/node": "^22.15.3",
+    "@vitest/coverage-v8": "^5.0.4",
     "tsx": "^4.19.4",
-    "@types/node": "^22.15.3"
+    "typescript": "^5.8.3",
+    "vitest": "^5.0.4"
   },
-  "keywords": ["reddit", "api", "mcp", "chrome-devtools", "unofficial", "free"],
+  "keywords": [
+    "reddit",
+    "api",
+    "mcp",
+    "chrome-devtools",
+    "unofficial",
+    "free"
+  ],
   "license": "MIT"
 }

@@ -1,0 +1,154 @@
+{
+  "comment": [
+    "Shared sanitizer conformance fixtures (ticket 06).",
+    "Drives BOTH suites: Vitest (test/sanitize.parity.test.ts) and pytest",
+    "(test_server.py, read from reddit-unofficial-api/test/fixtures/).",
+    "Semantics per docs/SANITIZATION.md sections 1-3: ANSI -> zero-width ->",
+    "control -> whitespace collapse -> markdown escape -> truncation. XML",
+    "escaping (section 4) is a later, Python-server-only stage and is NOT",
+    "exercised here.",
+    "",
+    "Each case: id, input (null = None/undefined), max_chars (null = default",
+    "500), expected. max_chars 0 means truncation OFF: both implementations",
+    "guard with max_chars > 1, so 0 (and 1) return the full text. Readers",
+    "must treat 0 as a real value (nullish check), not swap it for 500.",
+    "Expected values are derived from the spec and verified against both",
+    "implementations. Keep cases BMP-only: Python truncates by code point",
+    "while JS slices UTF-16 code units, so astral characters are out of",
+    "scope for this file."
+  ],
+  "cases": [
+    {
+      "id": "ansi_color_codes",
+      "input": "line1\u001b[31mred\u001b[0mhidden \u000btabbed next",
+      "max_chars": null,
+      "expected": "line1redhidden tabbed next"
+    },
+    {
+      "id": "ansi_private_and_erase_sequences",
+      "input": "\u001b[?25lplain\u001b[2Jdone",
+      "max_chars": null,
+      "expected": "plaindone"
+    },
+    {
+      "id": "ansi_standalone_esc_stripped_by_control_pass",
+      "input": "a\u001bb",
+      "max_chars": null,
+      "expected": "ab"
+    },
+    {
+      "id": "ansi_osc_without_csi_bracket_survives_as_text",
+      "input": "\u001b]0;title\u0007body",
+      "max_chars": null,
+      "expected": "\\]0;titlebody"
+    },
+    {
+      "id": "control_raw_codes_stripped",
+      "input": "a\u0000b\u0007cd\u001fe",
+      "max_chars": null,
+      "expected": "abcde"
+    },
+    {
+      "id": "whitespace_collapsed_to_single_space",
+      "input": "hello \t\r\n  world",
+      "max_chars": null,
+      "expected": "hello world"
+    },
+    {
+      "id": "whitespace_only_collapses_to_empty",
+      "input": "  \t\n\r\n ",
+      "max_chars": null,
+      "expected": ""
+    },
+    {
+      "id": "zero_width_stripped",
+      "input": "vis​ible‮ text﻿",
+      "max_chars": null,
+      "expected": "visible text"
+    },
+    {
+      "id": "zero_width_bidi_override_neutralized",
+      "input": "AB‮CD",
+      "max_chars": null,
+      "expected": "ABCD"
+    },
+    {
+      "id": "markdown_all_triggers_escaped",
+      "input": "[click](http://evil) `code` **bold** _em_ ~~strike~~",
+      "max_chars": null,
+      "expected": "\\[click\\](http://evil) \\`code\\` \\*\\*bold\\*\\* \\_em\\_ \\~\\~strike\\~\\~"
+    },
+    {
+      "id": "markdown_backslash_literal_kept_star_still_escaped",
+      "input": "a\\*b",
+      "max_chars": null,
+      "expected": "a\\\\*b"
+    },
+    {
+      "id": "xml_specials_pass_through_unescaped",
+      "input": "<script>alert(1)</script> & \"quoted\"",
+      "max_chars": null,
+      "expected": "<script>alert(1)</script> & \"quoted\""
+    },
+    {
+      "id": "truncation_default_500",
+      "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "max_chars": null,
+      "expected": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…"
+    },
+    {
+      "id": "truncation_custom_limit_20_words",
+      "input": "word word word word word word word word word word",
+      "max_chars": 20,
+      "expected": "word word word word…"
+    },
+    {
+      "id": "truncation_custom_limit_20_plain",
+      "input": "abcdefghijklmnopqrstuvwxyz",
+      "max_chars": 20,
+      "expected": "abcdefghijklmnopqrs…"
+    },
+    {
+      "id": "truncation_rstrips_trailing_space_before_ellipsis",
+      "input": "xxxxxxxxxxxxxxxxxx zzzzzzzzzzzz",
+      "max_chars": 20,
+      "expected": "xxxxxxxxxxxxxxxxxx…"
+    },
+    {
+      "id": "truncation_not_applied_at_exact_limit",
+      "input": "0123456789012345678",
+      "max_chars": 20,
+      "expected": "0123456789012345678"
+    },
+    {
+      "id": "truncation_short_input_untouched",
+      "input": "short",
+      "max_chars": 20,
+      "expected": "short"
+    },
+    {
+      "id": "truncation_zero_max_chars_disables_truncation",
+      "input": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+      "max_chars": 0,
+      "expected": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+    },
+    {
+      "id": "empty_string",
+      "input": "",
+      "max_chars": null,
+      "expected": ""
+    },
+    {
+      "id": "null_input",
+      "input": null,
+      "max_chars": null,
+      "expected": ""
+    },
+    {
+      "id": "kitchen_sink",
+      "input": "\u001b[31mbold\u001b[0m​ `code` \u0000 mixed \t\n input with ‮hidden chars and **markdown**",
+      "max_chars": 30,
+      "expected": "bold \\`code\\` mixed input wit…"
+    }
+  ]
+}

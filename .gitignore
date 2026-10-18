@@ -1,5 +1,7 @@
 node_modules/
 build/
+coverage/
 *.tsbuildinfo
 CLAUDE.local.md
 thoughts/
+err.log

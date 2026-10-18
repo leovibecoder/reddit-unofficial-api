@@ -3,6 +3,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { sanitizeText } from "./sanitize.js";
+import { TTLCache } from "./cache.js";
+import { extractUrl, extractionConfigured, extractionHealthy } from "./extract.js";
 
 // Reddit API helper — executes fetch() in Chrome DevTools context
 // Requires: chrome-devtools-mcp running + Reddit tab logged in
@@ -11,6 +14,40 @@ const server = new McpServer({
   name: "reddit-unofficial-api",
   version: "0.1.0",
 });
+
+// ==================== Build identity (kills version skew) ====================
+// The running process stamps its own version+sha into ensure_session and the
+// startup line, so agents can tell a stale host process from fresh build/.
+
+import { execSync } from "child_process";
+import { readFileSync } from "fs";
+
+function buildIdentity(): { bridge_version: string; build_sha: string } {
+  // build/index.js -> bridge root is one level up (".."), not two.
+  const bridgeRoot = new URL("..", import.meta.url);
+  let bridge_version = "unknown";
+  try {
+    const pkg = JSON.parse(
+      readFileSync(new URL("package.json", bridgeRoot), "utf8")
+    );
+    if (pkg?.version) bridge_version = String(pkg.version);
+  } catch {
+    // packaged without package.json nearby; keep "unknown"
+  }
+  let build_sha = "unknown";
+  try {
+    // cwd must be the bridge checkout: the host process may run anywhere.
+    build_sha = execSync("git rev-parse --short HEAD", { cwd: bridgeRoot, timeout: 5000 })
+      .toString()
+      .trim()
+      .slice(0, 12);
+  } catch {
+    // not a git checkout; keep "unknown"
+  }
+  return { bridge_version, build_sha };
+}
+
+const BUILD = buildIdentity();
 
 // ==================== Configuration ====================
 
@@ -27,7 +64,60 @@ async function rateLimit() {
   lastWriteTime = Date.now();
 }
 
-// ==================== CDP Communication ====================
+// Bridge-ready is the binary gate for every tool: CDP answers on
+// CHROME_CDP_URL, a reddit.com tab exists, and that tab is logged in.
+// Every failure below prefixes its layer so callers stop guessing:
+// CDP-unreachable | NO-REDDIT-TAB | NOT-LOGGED-IN | REDDIT-EVAL.
+
+async function checkCdpVersion(): Promise<any> {
+  let resp: Response;
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    try {
+      resp = await fetch(`${CHROME_CDP_URL}/json/version`, { signal: ctrl.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (e: any) {
+    throw new Error(
+      `CDP-unreachable: curl ${CHROME_CDP_URL}/json/version failed (${e?.message || e}). ` +
+      `Start Chrome with --remote-debugging-port=9222, then open reddit.com. See scripts/chrome-bridge.sh.`
+    );
+  }
+  if (!resp.ok) {
+    throw new Error(
+      `CDP-unreachable: ${CHROME_CDP_URL}/json/version returned HTTP ${resp.status}. ` +
+      `Restart Chrome with --remote-debugging-port=9222.`
+    );
+  }
+  return resp.json();
+}
+
+async function findRedditTab(): Promise<any> {
+  let targetsResp: Response;
+  try {
+    targetsResp = await fetch(`${CHROME_CDP_URL}/json`);
+  } catch (e: any) {
+    throw new Error(
+      `CDP-unreachable: curl ${CHROME_CDP_URL}/json failed (${e?.message || e}). ` +
+      `Start Chrome with --remote-debugging-port=9222. See scripts/chrome-bridge.sh.`
+    );
+  }
+  const targets = await targetsResp.json();
+
+  const redditTab = targets.find((t: any) =>
+    t.type === "page" && t.url?.includes("reddit.com")
+  );
+
+  if (!redditTab) {
+    throw new Error("NO-REDDIT-TAB: no reddit.com tab found in Chrome. Open reddit.com in the debug Chrome window.");
+  }
+  if (!redditTab.webSocketDebuggerUrl) {
+    throw new Error("NO-REDDIT-TAB: reddit.com tab has no debugger URL. Reload the tab and retry.");
+  }
+  return redditTab;
+}
 
 interface CDPResult {
   result: { type: string; value?: any; description?: string };
@@ -35,18 +125,8 @@ interface CDPResult {
 }
 
 async function cdpCall(method: string, params: Record<string, any> = {}): Promise<any> {
-  // Get available targets
-  const targetsResp = await fetch(`${CHROME_CDP_URL}/json`);
-  const targets = await targetsResp.json();
-
-  // Find Reddit tab
-  const redditTab = targets.find((t: any) =>
-    t.type === "page" && t.url?.includes("reddit.com")
-  );
-
-  if (!redditTab) {
-    throw new Error("No Reddit tab found in Chrome. Open reddit.com and log in first.");
-  }
+  // Layered lookup: CDP first, then tab. Each layer throws its own prefix.
+  const redditTab = await findRedditTab();
 
   // Connect via WebSocket
   const ws = new WebSocket(redditTab.webSocketDebuggerUrl);
@@ -89,12 +169,175 @@ async function evalInReddit(script: string): Promise<any> {
   }) as CDPResult;
 
   if (result.exceptionDetails) {
-    throw new Error(`Reddit eval error: ${result.exceptionDetails.text || result.result?.description}`);
+    throw new Error(`REDDIT-EVAL: ${result.exceptionDetails.text || result.result?.description}`);
   }
   return result.result?.value;
 }
 
+// Compact projection: listing payloads from reddit.com are huge (media
+// metadata, award blobs). Default every listing tool to the fields an agent
+// actually reads. Pass compact=false for the raw payload.
+// All text fields pass sanitizeText (per docs/SANITIZATION.md) before
+// truncation. Structural fields (score, comments, link) stay untouched.
+// Preview fields (media, preview, thumb) tell the reader what a click
+// opens, so curators rarely need a follow-up fetch per item (retro 2026-10-13).
+function mediaKind(d: any): "gallery" | "video" | "image" | "text" | "link" {
+  if (d?.is_gallery === true || Array.isArray(d?.gallery_data?.items)) return "gallery";
+  if (d?.is_video === true || d?.post_hint === "hosted:video" || d?.post_hint === "rich:video") return "video";
+  if (d?.post_hint === "image") return "image";
+  if (d?.is_self === true || d?.post_hint === "self") return "text";
+  const u = String(d?.url || "");
+  if (/\.(png|jpe?g|gif|webp)(\?|#|$)/i.test(u) || u.includes("i.redd.it")) return "image";
+  if (u.includes("v.redd.it")) return "video";
+  return "link";
+}
+
+function compactChildren(data: any): any[] {
+  const kids: any[] = data?.data?.children ?? data?.children ?? [];
+  return kids.map((c: any) => {
+    const d = c?.data ?? {};
+    const item: Record<string, any> = { kind: c?.kind, id: d?.name || d?.id };
+    if (d?.permalink) item.link = `https://www.reddit.com${d.permalink}`;
+    else if (d?.url) item.link = d.url;
+    if (d?.subreddit) item.sub = sanitizeText(d.subreddit, 100);
+    if (d?.title) item.title = sanitizeText(d.title, 140);
+    if (d?.subject) item.subject = sanitizeText(d.subject, 140);
+    if (d?.author) item.author = sanitizeText(d.author, 100);
+    if (typeof d?.score === "number") item.score = d.score;
+    if (typeof d?.num_comments === "number") item.comments = d.num_comments;
+    if (d?.body) item.body = sanitizeText(d.body, 280);
+    if (d?.url && d.url !== d?.permalink && d.url !== item.link) item.url = d.url;
+    // What-click-opens preview: media kind is structural (never sanitized,
+    // so agents can branch on it); preview is sanitized selftext (text posts)
+    // or a gallery count; thumb is a raw thumbnail URL when Reddit sends one.
+    const media = mediaKind(d);
+    item.media = media;
+    if (typeof d?.selftext === "string" && d.selftext.trim()) {
+      item.preview = sanitizeText(d.selftext, 200);
+    } else if (media === "gallery") {
+      const n = d?.gallery_data?.items?.length;
+      item.preview = typeof n === "number" ? `${n} images` : "gallery";
+    }
+    const thumb = typeof d?.thumbnail === "string" && d.thumbnail.startsWith("http") ? d.thumbnail : "";
+    if (thumb) item.thumb = thumb;
+    return item;
+  });
+}
+
+function listingOut(data: any, compact: boolean): string {
+  if (!compact) return JSON.stringify(data, null, 2);
+  return JSON.stringify(compactChildren(data), null, 1);
+}
+
+// Paginated reads trip Reddit's throttle at full speed (429), while ~2s gaps
+// stay clean. Pace follow-up page requests inside a single tool call.
+const READ_PACE_MS = 2000;
+let lastReadTime = 0;
+
+async function paceReads() {
+  const now = Date.now();
+  const elapsed = now - lastReadTime;
+  if (elapsed < READ_PACE_MS) {
+    await new Promise(r => setTimeout(r, READ_PACE_MS - elapsed));
+  }
+  lastReadTime = Date.now();
+}
+
+// Subreddit objects (t5) carry no title/body: project the fields that tell
+// subs apart instead. Same compact-by-default contract as listings.
+function compactSubs(data: any): any[] {
+  const kids: any[] = data?.data?.children ?? data?.children ?? [];
+  return kids.map((c: any) => {
+    const d = c?.data ?? {};
+    const name = sanitizeText(d?.display_name || d?.name || "", 100);
+    const item: Record<string, any> = { kind: c?.kind, name };
+    if (d?.display_name_prefixed) item.prefixed = sanitizeText(d.display_name_prefixed, 120);
+    else if (name) item.prefixed = `r/${name}`;
+    if (d?.title) item.title = sanitizeText(d.title, 120);
+    if (typeof d?.subscribers === "number") item.subscribers = d.subscribers;
+    if (typeof d?.over18 === "boolean") item.over18 = d.over18;
+    if (name) item.link = `https://www.reddit.com/r/${name}/`;
+    return item;
+  });
+}
+
+// LabeledMulti objects are not listings: project display name, path,
+// visibility, and the member subreddit names.
+function compactMultis(data: any): any[] {
+  const arr: any[] = Array.isArray(data) ? data : [];
+  return arr.map((m: any) => {
+    const d = m?.data ?? {};
+    const subs: string[] = (d?.subreddits ?? []).map((s: any) => sanitizeText(s?.name, 100)).filter(Boolean);
+    const item: Record<string, any> = {
+      kind: m?.kind,
+      name: sanitizeText(d?.name || "", 100),
+      display_name: sanitizeText(d?.display_name || d?.name || "", 140),
+    };
+    if (d?.path) {
+      item.path = d.path;
+      item.link = `https://www.reddit.com${d.path}`;
+    }
+    if (typeof d?.visibility === "string") item.visibility = d.visibility;
+    item.subCount = subs.length;
+    item.subs = subs;
+    return item;
+  });
+}
+
+// TrophyList objects: project trophy name, description, icon.
+function compactTrophies(data: any): any[] {
+  const t = data?.data?.trophies ?? [];
+  return t.map((t: any) => {
+    const d = t?.data ?? {};
+    return {
+      kind: t?.kind,
+      name: sanitizeText(d?.name || "", 140),
+      description: sanitizeText(d?.description || "", 280),
+      icon: d?.icon_70 || d?.icon_40 || "",
+    };
+  });
+}
+
+// Friends (prefs/friends.json): array of UserList objects with children arrays.
+function compactFriends(data: any): any[] {
+  const lists: any[] = Array.isArray(data) ? data : [];
+  return lists.flatMap((list: any) =>
+    (list?.data?.children ?? []).map((c: any) => {
+      const d = c?.data ?? {};
+      return {
+        kind: c?.kind,
+        name: sanitizeText(d?.name || d?.id || "", 100),
+        id: d?.id || "",
+        date: d?.date || 0,
+      };
+    })
+  );
+}
+
+// Moderator subreddits (subreddits/mine/moderator.json): listing of subreddits.
+function compactModOf(data: any): any[] {
+  const kids: any[] = data?.data?.children ?? data?.children ?? [];
+  return kids.map((c: any) => {
+    const d = c?.data ?? {};
+    const name = sanitizeText(d?.display_name || d?.name || "", 100);
+    return {
+      kind: c?.kind,
+      name,
+      prefixed: sanitizeText(d?.display_name_prefixed || (name ? `r/${name}` : ""), 120),
+      subscribers: d?.subscribers,
+      over18: d?.over18,
+      link: name ? `https://www.reddit.com/r/${name}/` : "",
+    };
+  });
+}
+
 // ==================== Reddit API Helpers ====================
+
+// Per-PRD 5.1 cache TTLs (seconds). Env-overridable.
+const TTL_FEED = Number(process.env.CACHE_TTL_SECONDS || "120");
+const TTL_INBOX = Number(process.env.CACHE_TTL_INBOX_SECONDS || "30");
+const TTL_POST = Number(process.env.CACHE_TTL_POST_SECONDS || "300");
+const cache = new TTLCache();
 
 async function getModhash(): Promise<string> {
   const result = await evalInReddit(`
@@ -104,7 +347,7 @@ async function getModhash(): Promise<string> {
       return data.data?.modhash || '';
     })()
   `);
-  if (!result) throw new Error("Could not get modhash. Are you logged in to Reddit?");
+  if (!result) throw new Error("NOT-LOGGED-IN: could not get modhash. Log in to Reddit in the debug Chrome window.");
   return result;
 }
 
@@ -121,6 +364,16 @@ async function redditGet(path: string, params: Record<string, string> = {}): Pro
   `);
 }
 
+// Cached listing GET: PRD 4 stage 1 (rate-limit/cache check). Never caches
+// error payloads; session probes (me.json) stay on uncached redditGet.
+async function redditGetCached(path: string, params: Record<string, string> = {}, ttl: number = TTL_FEED): Promise<any> {
+  const hit = cache.get(path, params);
+  if (hit !== undefined) return hit;
+  const data = await redditGet(path, params);
+  if (!data?.error) cache.set(path, params, data, ttl);
+  return data;
+}
+
 async function redditPost(path: string, params: Record<string, string>): Promise<any> {
   await rateLimit();
   const modhash = await getModhash();
@@ -129,7 +382,7 @@ async function redditPost(path: string, params: Record<string, string>): Promise
 
   const body = new URLSearchParams(params).toString();
 
-  return evalInReddit(`
+  const result = evalInReddit(`
     (async () => {
       const resp = await fetch('https://www.reddit.com${path}', {
         method: 'POST',
@@ -138,9 +391,41 @@ async function redditPost(path: string, params: Record<string, string>): Promise
         body: '${body.replace(/'/g, "\\'")}'
       });
       const text = await resp.text();
-      try { return JSON.parse(text); } catch(e) { return { error: 'parse_error', raw: text.substring(0, 500) }; }
+      try { return JSON.parse(text); } catch(e) { return { error: 'parse_error', status: resp.status, raw: text.substring(0, 500) }; }
     })()
   `);
+  cache.clear(); // any write invalidates cached reads (scores, listings, state)
+  return result;
+}
+
+// JSON-body POST/PUT/DELETE for endpoints that take structured bodies
+// (multi create/update/delete). Reddit's multi API is quirky: the payload
+// rides a form-encoded `model` field (a stringified LabeledMulti), with the
+// modhash in the X-Modhash header. Plain JSON bodies return JSON_PARSE_ERROR.
+async function redditForm(
+  method: "POST" | "PUT" | "DELETE",
+  path: string,
+  params: Record<string, string> = {}
+): Promise<any> {
+  await rateLimit();
+  const modhash = await getModhash();
+  const body = new URLSearchParams(params).toString();
+
+  const result = evalInReddit(`
+    (async () => {
+      const resp = await fetch('https://www.reddit.com${path}', {
+        method: '${method}',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Modhash': '${modhash}' },
+        body: '${body.replace(/'/g, "\\'")}'
+      });
+      const text = await resp.text();
+      if (!text) return null; // DELETE returns empty body on success
+      try { return JSON.parse(text); } catch(e) { return { error: 'parse_error', status: resp.status, raw: text.substring(0, 500) }; }
+    })()
+  `);
+  cache.clear();
+  return result;
 }
 
 // ==================== MCP Tools ====================
@@ -159,25 +444,31 @@ server.tool(
 
 server.tool(
   "reddit_get_post",
-  "Get a Reddit post and its comments",
+  "Get a Reddit post and its comments (compact projection by default)",
   {
     url: z.string().describe("Reddit post URL or post ID (e.g. '1sdv3lo')"),
     sort: z.enum(["top", "new", "best", "controversial", "old", "qa"]).default("top").describe("Comment sort order"),
     limit: z.number().default(100).describe("Max comments to return"),
+    compact: z.boolean().default(true).describe("Project to sub/title/author/score/comments/body only. False returns the raw payload."),
   },
-  async ({ url, sort, limit }) => {
+  async ({ url, sort, limit, compact }) => {
     // Extract post ID from URL
     const match = url.match(/comments\/([a-z0-9]+)/);
     const postId = match ? match[1] : url;
 
-    const data = await redditGet(`/comments/${postId}.json`, { sort, limit: String(limit) });
+    const data = await redditGetCached(`/comments/${postId}.json`, { sort, limit: String(limit) }, TTL_POST);
 
     if (Array.isArray(data) && data.length >= 2) {
-      const post = data[0]?.data?.children?.[0]?.data;
-      const comments = data[1]?.data?.children?.map((c: any) => c.data) || [];
-      return { content: [{ type: "text", text: JSON.stringify({ post, comments }, null, 2) }] };
+      if (!compact) {
+        const post = data[0]?.data?.children?.[0]?.data;
+        const comments = data[1]?.data?.children?.map((c: any) => c.data) || [];
+        return { content: [{ type: "text", text: JSON.stringify({ post, comments }, null, 2) }] };
+      }
+      const post = compactChildren(data[0])[0];
+      const comments = compactChildren(data[1]);
+      return { content: [{ type: "text", text: JSON.stringify({ post, comments }, null, 1) }] };
     }
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    return { content: [{ type: "text", text: listingOut(data, compact) }] };
   }
 );
 
@@ -192,7 +483,7 @@ server.tool(
     const match = url.match(/comments\/([a-z0-9]+)/);
     const postId = match ? match[1] : url;
 
-    const data = await redditGet(`/comments/${postId}.json`, { sort, limit: "500" });
+    const data = await redditGetCached(`/comments/${postId}.json`, { sort, limit: "500" }, TTL_POST);
 
     if (!Array.isArray(data) || data.length < 2) {
       return { content: [{ type: "text", text: "Could not fetch comments" }] };
@@ -224,76 +515,331 @@ server.tool(
   }
 );
 
+// Batch post details: one call for many posts, paced server-side (2s gaps,
+// same paceReads as paginated reads). Replaces N parallel reddit_get_post
+// calls when curating a feed (retro 2026-10-13: 46 parallel fetches for
+// 50 feed items). Results keep input order; per-item errors stay local.
+server.tool(
+  "reddit_get_posts",
+  "Get several Reddit posts and their top comments in one paced call (compact projection by default)",
+  {
+    ids: z.array(z.string()).min(1).max(25).describe("Post IDs or URLs (max 25), in the order to return"),
+    sort: z.enum(["top", "new", "best", "controversial", "old", "qa"]).default("top").describe("Comment sort order"),
+    limit: z.number().min(0).max(50).default(10).describe("Max comments per post (0 = post only)"),
+    compact: z.boolean().default(true).describe("Project to sub/title/author/score/comments/body only. False returns the raw payload."),
+  },
+  async ({ ids, sort, limit, compact }) => {
+    const out: any[] = [];
+    for (let i = 0; i < ids.length; i++) {
+      if (i > 0) await paceReads();
+      const raw = ids[i];
+      const match = raw.match(/comments\/([a-z0-9]+)/);
+      const postId = match ? match[1] : raw;
+      if (!/^[a-z0-9]+$/i.test(postId)) {
+        out.push({ id: raw, error: `invalid post ID: '${raw}'` });
+        continue;
+      }
+      const data = await redditGetCached(`/comments/${postId}.json`, { sort, limit: String(Math.max(limit, 1)) }, TTL_POST);
+      if (data?.error) {
+        out.push({ id: postId, error: data.error, statusText: data.statusText });
+        continue;
+      }
+      if (Array.isArray(data) && data.length >= 2) {
+        if (!compact) {
+          out.push({
+            id: postId,
+            post: data[0]?.data?.children?.[0]?.data,
+            comments: (data[1]?.data?.children?.map((c: any) => c.data) || []).slice(0, limit),
+          });
+        } else {
+          out.push({
+            id: postId,
+            post: compactChildren(data[0])[0],
+            comments: compactChildren(data[1]).slice(0, limit),
+          });
+        }
+      } else {
+        out.push({ id: postId, error: "unexpected response" });
+      }
+    }
+    return { content: [{ type: "text", text: JSON.stringify(out, null, 1) }] };
+  }
+);
+
+// ==== Home feed ====
+
+// Sort → path for the logged-in home feed. Single lookup instead of an
+// if-cascade (sibling tools interpolate sort into larger paths, so a
+// shared helper would over-fit; this map covers the pure-sort case).
+const HOME_FEED_PATHS: Record<"hot" | "new" | "top" | "rising", string> = {
+  hot: "/hot.json",
+  new: "/new.json",
+  top: "/top.json",
+  rising: "/rising.json",
+};
+
+server.tool(
+  "reddit_get_home_feed",
+  "Get the logged-in user's home feed (compact by default)",
+  {
+    sort: z.enum(["hot", "new", "top", "rising"]).default("hot"),
+    limit: z.number().min(1).max(50).default(15),
+    time: z.enum(["hour", "day", "week", "month", "year", "all"]).optional().describe("Time filter — only valid when sort is 'top' (defaults to 'day')"),
+    after_id: z.string().optional().describe("Fullname cursor (t3_...) to page from — for reading past the first page"),
+  },
+  async ({ sort, limit, time, after_id }) => {
+    if (sort !== "top" && time !== undefined) {
+      return { content: [{ type: "text", text: JSON.stringify({ error: "time applies only when sort is 'top'" }) }] };
+    }
+    const path = HOME_FEED_PATHS[sort];
+    const base: Record<string, string> = {};
+    if (sort === "top") base.t = time ?? "day";
+    // Server-side accumulator (PRD 4.1 after_id + agreed pacing): page
+    // through the listing up to limit, 2s between pages. The caller never
+    // chains cursors by hand; after_id only resumes a previous read.
+    const cap = Math.min(Math.max(limit, 1), 50);
+    const perPage = 25;
+    const all: any[] = [];
+    let after = after_id ?? "";
+    for (let page = 0; page < 4 && all.length < cap; page++) {
+      if (page > 0) await paceReads();
+      const params: Record<string, string> = { ...base, limit: String(Math.min(perPage, cap - all.length)) };
+      if (after) params.after = after;
+      const data = await redditGetCached(path, params, TTL_FEED);
+      if (data?.error) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: data.error, statusText: data.statusText }) }] };
+      }
+      const kids: any[] = data?.data?.children ?? [];
+      all.push(...kids);
+      after = data?.data?.after || "";
+      if (!after) break;
+    }
+    const out = { data: { children: all.slice(0, cap) } };
+    return { content: [{ type: "text", text: JSON.stringify(compactChildren(out), null, 1) }] };
+  }
+);
+
+
 server.tool(
   "reddit_get_user",
-  "Get a Reddit user's profile, posts, or comments",
+  "Get a Reddit user's profile, posts, or comments (compact projection by default)",
   {
-    username: z.string().describe("Reddit username"),
-    type: z.enum(["about", "overview", "submitted", "comments"]).default("about"),
+    username: z.string().describe("Reddit username, or 'me' for the logged-in account"),
+    type: z
+      .enum([
+        "about",
+        "overview",
+        "submitted",
+        "comments",
+        "controversial",
+        "trophies",
+        "friends",
+        "moderator",
+        "upvoted",
+        "downvoted",
+        "saved",
+        "hidden",
+      ])
+      .default("about")
+      .describe(
+        "upvoted, downvoted, saved, hidden, controversial, trophies, friends, and moderator are private to the logged-in account: pass username 'me' or your own name."
+      ),
     limit: z.number().default(25),
+    compact: z.boolean().default(true).describe("Project to sub/title/author/score/comments/body only. False returns the raw payload."),
   },
-  async ({ username, type, limit }) => {
-    const path = type === "about"
-      ? `/user/${username}/about.json`
-      : `/user/${username}/${type}.json`;
-    const data = await redditGet(path, { limit: String(limit) });
-    return { content: [{ type: "text", text: JSON.stringify(data.data || data, null, 2) }] };
+  async ({ username, type, limit, compact }) => {
+    let path: string;
+    if (type === "about") {
+      path = `/user/${username}/about.json`;
+      const data = await redditGetCached(path, {}, TTL_FEED);
+      if (!compact) return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+      // about.json returns a single t2 object, not a listing — return as-is
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 1) }] };
+    }
+    if (type === "trophies") {
+      path = `/user/${username}/trophies.json`;
+      const data = await redditGetCached(path, {}, TTL_FEED);
+      if (!compact) return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(compactTrophies(data), null, 1) }] };
+    }
+    if (type === "friends") {
+      path = `/prefs/friends.json`;
+      const data = await redditGetCached(path, {}, TTL_FEED);
+      if (!compact) return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(compactFriends(data), null, 1) }] };
+    }
+    if (type === "moderator") {
+      path = `/subreddits/mine/moderator.json`;
+      const data = await redditGetCached(path, {}, TTL_FEED);
+      if (!compact) return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(compactModOf(data), null, 1) }] };
+    }
+    // listing types: overview, submitted, comments, controversial, upvoted, downvoted, saved, hidden
+    path = `/user/${username}/${type}.json`;
+    const data = await redditGetCached(path, { limit: String(limit) }, TTL_FEED);
+    return { content: [{ type: "text", text: listingOut(data, compact) }] };
   }
 );
 
 server.tool(
   "reddit_get_subreddit",
-  "Get subreddit info, rules, or posts",
+  "Get subreddit info, rules, or posts (compact projection by default)",
   {
     subreddit: z.string().describe("Subreddit name (without r/)"),
     type: z.enum(["about", "rules", "hot", "new", "top", "rising"]).default("hot"),
     limit: z.number().default(25),
     time: z.enum(["hour", "day", "week", "month", "year", "all"]).default("day").describe("Time filter for top/controversial"),
+    compact: z.boolean().default(true).describe("Project to sub/title/author/score/comments/body only. False returns the raw payload."),
   },
-  async ({ subreddit, type, limit, time }) => {
+  async ({ subreddit, type, limit, time, compact }) => {
     const path = ["about", "rules"].includes(type)
       ? `/r/${subreddit}/about/${type === "about" ? "" : "rules"}.json`
       : `/r/${subreddit}/${type}.json`;
-    const data = await redditGet(path, { limit: String(limit), t: time });
-    return { content: [{ type: "text", text: JSON.stringify(data.data || data, null, 2) }] };
+    const data = await redditGetCached(path, { limit: String(limit), t: time }, TTL_FEED);
+    return { content: [{ type: "text", text: listingOut(data, compact) }] };
   }
 );
 
 server.tool(
   "reddit_search",
-  "Search Reddit posts",
+  "Search Reddit posts within a subreddit (compact projection by default). Subreddit is required: global search returns junk (CODING_STANDARDS 8.3).",
   {
     query: z.string().describe("Search query"),
-    subreddit: z.string().optional().describe("Limit to subreddit (optional)"),
+    subreddit: z.string().describe("Subreddit to search (required, without r/)"),
     sort: z.enum(["relevance", "hot", "top", "new", "comments"]).default("relevance"),
     time: z.enum(["hour", "day", "week", "month", "year", "all"]).default("all"),
     limit: z.number().default(25),
+    compact: z.boolean().default(true).describe("Project to sub/title/author/score/comments/body only. False returns the raw payload."),
   },
-  async ({ query, subreddit, sort, time, limit }) => {
-    const path = subreddit
-      ? `/r/${subreddit}/search.json`
-      : `/search.json`;
-    const params: Record<string, string> = { q: query, sort, t: time, limit: String(limit) };
-    if (subreddit) params.restrict_sr = "on";
-    const data = await redditGet(path, params);
-    return { content: [{ type: "text", text: JSON.stringify(data.data || data, null, 2) }] };
+  async ({ query, subreddit, sort, time, limit, compact }) => {
+    const path = `/r/${subreddit}/search.json`;
+    const params: Record<string, string> = { q: query, sort, t: time, limit: String(limit), restrict_sr: "on" };
+    const data = await redditGetCached(path, params, TTL_FEED);
+    return { content: [{ type: "text", text: listingOut(data, compact) }] };
   }
 );
 
 server.tool(
   "reddit_get_inbox",
-  "Get Reddit messages (inbox, unread, or sent)",
+  "Get Reddit messages (inbox, unread, sent, comment replies, post replies, or mentions) (compact projection by default)",
   {
-    type: z.enum(["inbox", "unread", "sent"]).default("unread"),
+    type: z.enum(["inbox", "unread", "sent", "comments", "selfreply", "mentions"]).default("unread").describe("comments = replies to your comments, selfreply = replies to your posts, mentions = username mentions."),
     limit: z.number().default(25),
+    compact: z.boolean().default(true).describe("Project to sub/title/author/score/comments/body only. False returns the raw payload."),
   },
-  async ({ type, limit }) => {
-    const data = await redditGet(`/message/${type}.json`, { limit: String(limit) });
-    return { content: [{ type: "text", text: JSON.stringify(data.data || data, null, 2) }] };
+  async ({ type, limit, compact }) => {
+    const data = await redditGetCached(`/message/${type}.json`, { limit: String(limit) }, TTL_INBOX);
+    return { content: [{ type: "text", text: listingOut(data, compact) }] };
   }
 );
 
-// --- Write Operations ---
+server.tool(
+  "reddit_get_subscriptions",
+  "List the subreddits the logged-in account subscribes to (compact projection by default)",
+  {
+    limit: z.number().default(100).describe("Max subreddits to return (server pages through the listing up to this cap)"),
+    compact: z.boolean().default(true).describe("Project to name/title/subscribers/over18/link only. False returns the raw payload."),
+  },
+  async ({ limit, compact }) => {
+    const cap = Math.min(Math.max(limit, 1), 100);
+    const perPage = 25;
+    const all: any[] = [];
+    let after = "";
+    let rawFirstPage: any = null;
+    for (let page = 0; page < 4 && all.length < cap; page++) {
+      if (page > 0) await paceReads();
+      const params: Record<string, string> = { limit: String(Math.min(perPage, cap - all.length)) };
+      if (after) params.after = after;
+      const data = await redditGetCached("/subreddits/mine/subscriber.json", params, TTL_FEED);
+      if (data?.error) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: data.error, statusText: data.statusText }) }] };
+      }
+      if (page === 0) rawFirstPage = data;
+      const kids: any[] = data?.data?.children ?? [];
+      all.push(...kids);
+      after = data?.data?.after || "";
+      if (!after) break;
+    }
+    if (!compact && rawFirstPage) {
+      // For raw, return the first page's actual Reddit payload (what the API returns)
+      // with a note about additional pages if we fetched more
+      return { content: [{ type: "text", text: JSON.stringify(rawFirstPage, null, 2) }] };
+    }
+    const out = { data: { children: all.slice(0, cap), after: after || null } };
+    return { content: [{ type: "text", text: JSON.stringify(compactSubs(out), null, 1) }] };
+  }
+);
+
+server.tool(
+  "reddit_get_multis",
+  "List the logged-in account's multis (custom feeds): display name, path, visibility, member subreddits",
+  {
+    compact: z.boolean().default(true).describe("Project to name/path/visibility/subreddit names only. False returns the raw payload."),
+  },
+  async ({ compact }) => {
+    const data = await redditGetCached("/api/multi/mine.json", {}, TTL_FEED);
+    if (!Array.isArray(data)) {
+      return { content: [{ type: "text", text: JSON.stringify({ error: data?.error || "unexpected response", statusText: data?.statusText }) }] };
+    }
+    if (!compact) return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    return { content: [{ type: "text", text: JSON.stringify(compactMultis(data), null, 1) }] };
+  }
+);
+
+server.tool(
+  "reddit_get_multi_feed",
+  "Read posts from one of the logged-in account's multis (custom feeds) (compact projection by default)",
+  {
+    multi: z.string().describe("Multi name (e.g. 'favoritos') or full path ('/user/<name>/m/<multi>'). Resolved against your multis, case-insensitive."),
+    limit: z.number().default(25).describe("Max posts to return (server pages through the listing up to this cap, max 100)"),
+    compact: z.boolean().default(true).describe("Project to sub/title/author/score/comments/link only. False returns the raw payload."),
+  },
+  async ({ multi, limit, compact }) => {
+    let path = multi.trim();
+    if (!path.startsWith("/user/")) {
+      const mine = await redditGetCached("/api/multi/mine.json", {}, TTL_FEED);
+      if (!Array.isArray(mine)) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: "could not list your multis", statusText: mine?.statusText }) }] };
+      }
+      const want = path.toLowerCase();
+      const hit = mine.find((m: any) =>
+        String(m?.data?.name || "").toLowerCase() === want ||
+        String(m?.data?.display_name || "").toLowerCase() === want
+      );
+      if (!hit?.data?.path) {
+        const names = mine.map((m: any) => m?.data?.name).filter(Boolean);
+        return { content: [{ type: "text", text: JSON.stringify({ error: `no multi named '${multi}'`, your_multis: names }) }] };
+      }
+      path = hit.data.path;
+    }
+    // Pace the initial multi listing read
+    await paceReads();
+    const cap = Math.min(Math.max(limit, 1), 100);
+    const perPage = 25;
+    const all: any[] = [];
+    let after = "";
+    let rawFirstPage: any = null;
+    for (let page = 0; page < 4 && all.length < cap; page++) {
+      if (page > 0) await paceReads();
+      const params: Record<string, string> = { limit: String(Math.min(perPage, cap - all.length)) };
+      if (after) params.after = after;
+      const data = await redditGetCached(`${path}.json`, params, TTL_FEED);
+      if (data?.error) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: data.error, statusText: data.statusText }) }] };
+      }
+      if (page === 0) rawFirstPage = data;
+      const kids: any[] = data?.data?.children ?? [];
+      all.push(...kids);
+      after = data?.data?.after || "";
+      if (!after) break;
+    }
+    if (!compact && rawFirstPage) {
+      return { content: [{ type: "text", text: JSON.stringify(rawFirstPage, null, 2) }] };
+    }
+    const out = { data: { children: all.slice(0, cap), after: after || null } };
+    return { content: [{ type: "text", text: JSON.stringify(compactChildren(out), null, 1) }] };
+  }
+);
 
 server.tool(
   "reddit_comment",
@@ -385,6 +931,50 @@ server.tool(
 );
 
 server.tool(
+  "reddit_mark_notifications_as_read",
+  "Mark specified Reddit notifications as read",
+  {
+    notification_ids: z.array(z.string()).describe("List of notification fullnames (t4_...) to mark as read"),
+  },
+  async ({ notification_ids }) => {
+    if (notification_ids.length === 0) {
+      return { content: [{ type: "text", text: JSON.stringify({ success: true, count: 0 }) }] };
+    }
+    const bad = notification_ids.filter((id) => !/^t4_[a-z0-9]+$/i.test(id));
+    if (bad.length > 0) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: false, count: 0, error: `invalid notification IDs (expected t4_...): ${bad.join(", ")}` }),
+          },
+        ],
+      };
+    }
+    // Surface the write result: a failed POST (400/401/parse_error) must
+    // never read as success (CODING_STANDARDS §6 round-trip rule).
+    const result = await redditPost("/api/read_message", { ids: notification_ids.join(",") });
+    const apiErrors = result?.json?.errors;
+    if (result?.error || (Array.isArray(apiErrors) && apiErrors.length > 0)) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              success: false,
+              count: 0,
+              error: result?.error ?? apiErrors,
+              ...(result?.status !== undefined ? { status: result.status } : {}),
+            }),
+          },
+        ],
+      };
+    }
+    return { content: [{ type: "text", text: JSON.stringify({ success: true, count: notification_ids.length }) }] };
+  }
+);
+
+server.tool(
   "reddit_edit",
   "Edit your own post or comment",
   {
@@ -423,23 +1013,189 @@ server.tool(
   }
 );
 
+server.tool(
+  "reddit_hide",
+  "Hide or unhide a post (hidden posts disappear from your feeds; reversible)",
+  {
+    thing_id: z.string().describe("Post fullname (t3_)"),
+    unhide: z.boolean().default(false).describe("Set true to unhide"),
+  },
+  async ({ thing_id, unhide }) => {
+    const path = unhide ? "/api/unhide" : "/api/hide";
+    await redditPost(path, { id: thing_id });
+    return { content: [{ type: "text", text: JSON.stringify({ success: true, action: unhide ? "unhidden" : "hidden", thing_id }) }] };
+  }
+);
+
+server.tool(
+  "reddit_multi_create",
+  "Create a new multi (custom feed) with member subreddits",
+  {
+    name: z.string().describe("Multi name: lowercase letters, numbers, underscores only (no hyphens/spaces)"),
+    subreddits: z.array(z.string()).describe("Subreddit names (without r/)"),
+    description: z.string().optional().describe("Multi description"),
+    visibility: z.enum(["private", "public", "hidden"]).default("private"),
+  },
+  async ({ name, subreddits, description, visibility }) => {
+    const safeName = name.trim().toLowerCase().replace(/[^a-z0-9_]/g, "_");
+    const me = await redditGet("/api/me.json");
+    const owner = me?.data?.name;
+    if (!owner) return { content: [{ type: "text", text: JSON.stringify({ error: "NOT-LOGGED-IN" }) }] };
+
+    const model: Record<string, any> = {
+      name: safeName,
+      path: `user:${owner}/m/${safeName}`,
+      visibility,
+      subreddits: subreddits.map((s) => ({ name: s })),
+    };
+    if (description) model.description_md = description;
+    const result = await redditForm("PUT", `/api/multi/user/${owner}/m/${safeName}`, {
+      model: JSON.stringify(model),
+      api_type: "json",
+    });
+    const ok = result?.kind === "LabeledMulti" && !result?.error && !result?.reason;
+    return { content: [{ type: "text", text: JSON.stringify({ success: ok, name: safeName, subCount: subreddits.length, result: ok ? "created" : result }) }] };
+  }
+);
+
+server.tool(
+  "reddit_multi_update",
+  "Update one of your multis: add or remove member subreddits, change description",
+  {
+    multi: z.string().describe("Multi name (e.g. 'favoritos')"),
+    add_subs: z.array(z.string()).optional().describe("Subreddit names to add"),
+    remove_subs: z.array(z.string()).optional().describe("Subreddit names to remove"),
+    description: z.string().optional().describe("New description"),
+  },
+  async ({ multi, add_subs, remove_subs, description }) => {
+    const me = await redditGet("/api/me.json");
+    const owner = me?.data?.name;
+    if (!owner) return { content: [{ type: "text", text: JSON.stringify({ error: "NOT-LOGGED-IN" }) }] };
+
+    const safeName = multi.trim().toLowerCase();
+    // Current membership
+    const current = await redditGet(`/api/multi/user/${owner}/m/${safeName}`);
+    if (current?.error || current?.reason) {
+      return { content: [{ type: "text", text: JSON.stringify({ error: `could not read multi '${safeName}'`, detail: current?.reason || current?.error }) }] };
+    }
+    const names: string[] = ((current?.data?.subreddits ?? current?.subreddits) ?? []).map((s: any) => s.name);
+    const add = add_subs ?? [];
+    const remove = remove_subs ?? [];
+    const next = [...new Set([...names.filter((n) => !remove.includes(n)), ...add])];
+
+    const model: Record<string, any> = {
+      name: safeName,
+      path: `user:${owner}/m/${safeName}`,
+      subreddits: next.map((s) => ({ name: s })),
+    };
+    if (description) model.description_md = description;
+    const result = await redditForm("PUT", `/api/multi/user/${owner}/m/${safeName}`, {
+      model: JSON.stringify(model),
+      api_type: "json",
+    });
+    const ok = result?.kind === "LabeledMulti" && !result?.error && !result?.reason;
+    return { content: [{ type: "text", text: JSON.stringify({ success: ok, multi: safeName, before: names.length, after: next.length, added: add, removed: remove.filter((r) => names.includes(r)) }) }] };
+  }
+);
+
+server.tool(
+  "reddit_multi_delete",
+  "Delete one of your multis (cannot be undone)",
+  {
+    multi: z.string().describe("Multi name to delete"),
+  },
+  async ({ multi }) => {
+    const me = await redditGet("/api/me.json");
+    const owner = me?.data?.name;
+    if (!owner) return { content: [{ type: "text", text: JSON.stringify({ error: "NOT-LOGGED-IN" }) }] };
+    const safeName = multi.trim().toLowerCase();
+    const result = await redditForm("DELETE", `/api/multi/user/${owner}/m/${safeName}`);
+    const failed = result?.reason || result?.error;
+    return { content: [{ type: "text", text: JSON.stringify({ success: !failed, deleted: safeName, detail: failed || "ok" }) }] };
+  }
+);
+
 // --- Utility ---
 
 server.tool(
   "reddit_ensure_session",
-  "Check if Reddit tab is open and user is logged in",
+  "Check bridge-ready: CDP answers, reddit.com tab exists, user is logged in. Probe this before any other reddit_* tool.",
   {},
   async () => {
+    const state: Record<string, any> = {
+      bridge_ready: false,
+      cdp_reachable: false,
+      chrome_version: null,
+      reddit_tab_found: false,
+      logged_in: false,
+      username: null,
+      bridge_version: BUILD.bridge_version,
+      build_sha: BUILD.build_sha,
+      cdp_url: CHROME_CDP_URL,
+    };
+    try {
+      const version = await checkCdpVersion();
+      state.cdp_reachable = true;
+      state.chrome_version = version?.Browser || version?.["User-Agent"] || "unknown";
+    } catch (e: any) {
+      state.error = e.message;
+      state.hint = "Run scripts/chrome-bridge.sh, then open reddit.com in that window.";
+      return { content: [{ type: "text", text: JSON.stringify(state, null, 2) }] };
+    }
+    try {
+      await findRedditTab();
+      state.reddit_tab_found = true;
+    } catch (e: any) {
+      state.error = e.message;
+      return { content: [{ type: "text", text: JSON.stringify(state, null, 2) }] };
+    }
     try {
       const data = await redditGet("/api/me.json");
-      const username = data.data?.name;
+      const username = data?.data?.name;
       if (username) {
-        return { content: [{ type: "text", text: `Logged in as u/${username}` }] };
+        state.logged_in = true;
+        state.username = username;
+        state.bridge_ready = true;
+        state.message = `bridge-ready: logged in as u/${username}`;
+      } else {
+        state.error = "NOT-LOGGED-IN: reddit.com tab found but no user. Log in to Reddit in Chrome.";
       }
-      return { content: [{ type: "text", text: "Reddit tab found but not logged in. Please log in to Reddit in Chrome." }] };
+      return { content: [{ type: "text", text: JSON.stringify(state, null, 2) }] };
     } catch (e: any) {
-      return { content: [{ type: "text", text: `Error: ${e.message}. Make sure Chrome is open with Reddit loaded.` }] };
+      state.error = e.message;
+      return { content: [{ type: "text", text: JSON.stringify(state, null, 2) }] };
     }
+  }
+);
+
+// --- External content extraction (PRD 7.1, ADR 0001, N-001) ---
+// Opt-in: curators call this only for link posts worth reading in full.
+// Disabled by default (CRAWL4AI_ENABLED=false, no key) — responds with a
+// clear hint instead of failing silently. Output is sanitizeText-gated.
+server.tool(
+  "reddit_extract",
+  "Extract readable markdown from an external URL (a link post's target article) to read it without fetching raw HTML. Off by default: set CRAWL4AI_ENABLED=true and CRAWL4AI_KEY.",
+  {
+    url: z.string().describe("External article URL (the post's `url` field, not the Reddit permalink)"),
+    max_chars: z.number().default(2000).describe("Truncate extracted markdown to this many characters"),
+  },
+  async ({ url, max_chars }) => {
+    if (!extractionConfigured()) {
+      return {
+        content: [{ type: "text", text: "extraction disabled: set CRAWL4AI_ENABLED=true and CRAWL4AI_KEY in the bridge environment" }],
+      };
+    }
+    if (!extractionHealthy()) {
+      return { content: [{ type: "text", text: "extraction unhealthy: 3 consecutive backend failures; retry after bridge restart" }] };
+    }
+    const result = await extractUrl(url, { log: (m) => console.error(m) });
+    if (!result) {
+      return { content: [{ type: "text", text: `extraction failed for ${url}; use reddit_get_post for the Reddit-native content` }] };
+    }
+    const markdown = sanitizeText(result.markdown, max_chars);
+    return {
+      content: [{ type: "text", text: JSON.stringify({ url, backend: result.backend, chars: markdown.length, markdown }, null, 1) }],
+    };
   }
 );
 
@@ -448,7 +1204,9 @@ server.tool(
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("reddit-unofficial-api MCP server running");
+  console.error(
+    `reddit-unofficial-api MCP server running version=${BUILD.bridge_version} sha=${BUILD.build_sha} cdp=${CHROME_CDP_URL}`
+  );
 }
 
 main().catch(console.error);

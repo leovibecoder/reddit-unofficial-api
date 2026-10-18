@@ -1,0 +1,33 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`bridge tools (needs build/index.js — run npm run build first) > registers the documented tools 1`] = `
+[
+  "reddit_comment",
+  "reddit_delete",
+  "reddit_edit",
+  "reddit_ensure_session",
+  "reddit_extract",
+  "reddit_get_comments",
+  "reddit_get_home_feed",
+  "reddit_get_inbox",
+  "reddit_get_multi_feed",
+  "reddit_get_multis",
+  "reddit_get_post",
+  "reddit_get_posts",
+  "reddit_get_subreddit",
+  "reddit_get_subscriptions",
+  "reddit_get_user",
+  "reddit_hide",
+  "reddit_mark_notifications_as_read",
+  "reddit_me",
+  "reddit_multi_create",
+  "reddit_multi_delete",
+  "reddit_multi_update",
+  "reddit_save",
+  "reddit_search",
+  "reddit_send_message",
+  "reddit_submit",
+  "reddit_subscribe",
+  "reddit_vote",
+]
+`;
