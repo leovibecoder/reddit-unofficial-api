@@ -330,6 +330,23 @@ function compactModOf(data: any): any[] {
     };
   });
 }
+// Helper to recursively sanitize string fields in Reddit objects
+function sanitizeReddit(obj: unknown): unknown {
+  if (typeof obj === 'string') {
+    return sanitizeText(obj);
+  }
+  if (obj === null || typeof obj !== 'object') {
+    return obj;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(sanitizeReddit);
+  }
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+    sanitized[key] = sanitizeReddit(value);
+  }
+  return sanitized;
+}
 
 // ==================== Reddit API Helpers ====================
 
@@ -438,7 +455,9 @@ server.tool(
   {},
   async () => {
     const data = await redditGet("/api/me.json");
-    return { content: [{ type: "text", text: JSON.stringify(data.data || data, null, 2) }] };
+    // Sanitize string fields in user data before output
+    const sanitizedData = sanitizeReddit(data.data || data);
+    return { content: [{ type: "text", text: JSON.stringify(sanitizedData, null, 2) }] };
   }
 );
 
@@ -462,7 +481,10 @@ server.tool(
       if (!compact) {
         const post = data[0]?.data?.children?.[0]?.data;
         const comments = data[1]?.data?.children?.map((c: any) => c.data) || [];
-        return { content: [{ type: "text", text: JSON.stringify({ post, comments }, null, 2) }] };
+        // Sanitize string fields in post and comments data before output
+        const sanitizedPost = sanitizeReddit(post);
+        const sanitizedComments = sanitizeReddit(comments);
+        return { content: [{ type: "text", text: JSON.stringify({ post: sanitizedPost, comments: sanitizedComments }, null, 2) }] };
       }
       const post = compactChildren(data[0])[0];
       const comments = compactChildren(data[1]);
@@ -510,8 +532,10 @@ server.tool(
       }
     }
     extract(data[1].data.children);
-
-    return { content: [{ type: "text", text: JSON.stringify(flat, null, 2) }] };
+    
+    // Sanitize string fields in comment data before output
+    const sanitizedFlat = sanitizeReddit(flat);
+    return { content: [{ type: "text", text: JSON.stringify(sanitizedFlat, null, 2) }] };
   }
 );
 
@@ -548,8 +572,8 @@ server.tool(
         if (!compact) {
           out.push({
             id: postId,
-            post: data[0]?.data?.children?.[0]?.data,
-            comments: (data[1]?.data?.children?.map((c: any) => c.data) || []).slice(0, limit),
+            post: sanitizeReddit(data[0]?.data?.children?.[0]?.data),
+            comments: sanitizeReddit((data[1]?.data?.children?.map((c: any) => c.data) || []).slice(0, limit)),
           });
         } else {
           out.push({
